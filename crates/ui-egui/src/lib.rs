@@ -54,6 +54,7 @@ pub mod cjk_fonts;
 pub mod clip_line_ui;
 pub mod color_picker_ui;
 pub mod color_range_ui;
+pub mod color_wheel;
 pub mod comps_ui;
 pub mod control;
 pub mod credits;

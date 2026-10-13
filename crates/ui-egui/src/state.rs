@@ -1039,6 +1039,12 @@ pub struct DockTabs {
 pub struct ColorPanelState {
     /// The panel edits the background colour (its chip was clicked), not the foreground.
     pub background: bool,
+    /// Show the hue ring + square instead of the spectrum field and hue strip.
+    pub wheel: bool,
+    /// Which hue wheel the ring shows (screen hues or the painter's RYB wheel).
+    pub wheel_kind: crate::color_wheel::WheelKind,
+    /// Harmony markers: `0` off, otherwise 1 + the index into `Harmony::ALL`.
+    pub harmony: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
