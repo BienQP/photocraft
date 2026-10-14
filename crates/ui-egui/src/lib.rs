@@ -32,6 +32,7 @@ pub mod brush_panel;
 pub mod brush_picker;
 pub mod brush_preset_dialog;
 pub mod brush_preview;
+pub mod brush_quick;
 pub mod brush_resize;
 pub mod brush_sections;
 pub mod brushes_tab;

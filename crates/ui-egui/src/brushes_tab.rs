@@ -939,6 +939,8 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     });
     commit_gesture(app, ui.ctx(), &before, &b);
     ui.add_space(4.0);
+    crate::brush_quick::show(app, ui);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         icons::paint(ui, egui::Rect::from_min_size(ui.cursor().min + vec2(0.0, 3.0), vec2(16.0, 16.0)), "search", 14.0, t.text_faint);
         ui.add_space(20.0);

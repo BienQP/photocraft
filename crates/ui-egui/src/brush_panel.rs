@@ -104,6 +104,9 @@ pub struct BrushesPanelState {
     /// width all the way — the text holds its 1.0 size, and at or below the compact threshold
     /// the tips drop the size number under them and take their cell whole.
     pub scale: f32,
+    /// Quick controls: the brush properties the Brushes panel shows as sliders
+    /// ([`crate::brush_quick`]).
+    pub quick: Vec<String>,
 }
 
 impl Default for BrushesPanelState {
@@ -117,6 +120,7 @@ impl Default for BrushesPanelState {
             show_stroke: true,
             show_tip: true,
             scale: 1.0,
+            quick: crate::brush_quick::default_quick(),
         }
     }
 }
