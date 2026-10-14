@@ -3843,6 +3843,7 @@ fn color_wheel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, hsva: egui::ecol
     }
     ui.add_space(4.0);
     luminosity_section(app, ui);
+    color_match_section(app, ui);
 }
 
 /// Luminosity masks: buttons for Lights, Darks, Mids and the eleven zones. Each runs the engine's
@@ -6280,5 +6281,105 @@ mod properties_target_regressions {
         h.run_steps(2);
         let after = h.state().session.active().unwrap().doc.layer(layer).unwrap().surface().unwrap().content_bounds();
         assert_eq!(after, before, "pending width belongs to the old document/layer");
+    }
+}
+
+/// One reference choice for Colour match: another open document, or a layer of this one.
+#[derive(Clone, Debug, PartialEq)]
+enum MatchRef {
+    Document(usize),
+    Layer(u64),
+}
+
+/// The references on offer: every other open document, then every raster-or-group layer of the
+/// active one (hidden layers included: a hidden layer is a fine reference).
+fn match_references(app: &PhotocraftApp) -> Vec<(String, MatchRef)> {
+    let mut out = Vec::new();
+    let active = app.session.active_index();
+    for (i, d) in app.session.documents().iter().enumerate() {
+        if Some(i) != active {
+            out.push((format!("Document: {}", d.doc.name), MatchRef::Document(i)));
+        }
+    }
+    if let Some(d) = app.session.active() {
+        for (_, _, l) in d.doc.walk().into_iter().rev() {
+            if !matches!(l.content, photocraft_doc::LayerContent::Adjustment(_)) {
+                out.push((format!("Layer: {}", l.name), MatchRef::Layer(l.id.0)));
+            }
+        }
+    }
+    out
+}
+
+/// Colour match: move this picture's colours toward a reference, keeping its own lighting, as a
+/// non-destructive Color Lookup layer (engine `layer.newColorMatchLayer`).
+fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Colour match").id_salt("swift-colour-match").default_open(false).show(ui, |ui| {
+        let refs = match_references(app);
+        let key = egui::Id::new("swift-colour-match-state");
+        // (reference index, strength %, match contrast, mean-only method)
+        let (mut pick, mut strength, mut contrast, mut mean): (usize, f32, bool, bool) = ui.data(|d| d.get_temp(key)).unwrap_or((0, 100.0, false, false));
+        pick = pick.min(refs.len().saturating_sub(1));
+        if refs.is_empty() {
+            ui.label(RichText::new("Open a second image, or add a reference layer.").size(11.0));
+            return;
+        }
+        egui::ComboBox::from_id_salt("swift-colour-match-ref")
+            .width(ui.available_width() - 8.0)
+            .selected_text(refs.get(pick).map_or("", |r| r.0.as_str()))
+            .show_ui(ui, |ui| {
+                for (i, (label, _)) in refs.iter().enumerate() {
+                    ui.selectable_value(&mut pick, i, label);
+                }
+            });
+        crate::widgets::slider_row(ui, "Strength", &mut strength, 0.0..=100.0, "%", None);
+        ui.checkbox(&mut contrast, "Match contrast").on_hover_text("Also take the reference's tonal range. Off keeps this picture's own lighting.");
+        ui.checkbox(&mut mean, "Average colour only").on_hover_text("Shift and scale each colour axis separately: simpler, gentler than the full match.");
+        ui.data_mut(|d| d.insert_temp(key, (pick, strength, contrast, mean)));
+        if ui.button("Match colours").on_hover_text("Adds a Color Lookup layer; mask it, fade it, or hide it afterwards").clicked()
+            && let Some((_, r)) = refs.get(pick)
+        {
+            let mut params = json!({"strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }});
+            match r {
+                MatchRef::Document(i) => params["source"] = json!(i),
+                MatchRef::Layer(id) => params["sourceLayer"] = json!(id),
+            }
+            let _ = app.run("layer.newColorMatchLayer", params);
+        }
+    });
+}
+
+#[cfg(test)]
+mod colour_match_tests {
+    use super::*;
+
+    fn app() -> PhotocraftApp {
+        PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default())
+    }
+
+    #[test]
+    fn references_are_other_documents_then_this_documents_layers() {
+        let mut a = app();
+        assert!(match_references(&a).is_empty(), "nothing open, nothing to match");
+        a.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+        let only_layers = match_references(&a);
+        assert_eq!(only_layers.len(), 1, "{only_layers:?}");
+        assert!(matches!(only_layers[0].1, MatchRef::Layer(_)));
+        a.run("file.new", json!({"width": 8, "height": 8, "background": "#e05010"})).unwrap();
+        a.run("document.activate", json!({"document": 0})).unwrap();
+        let refs = match_references(&a);
+        assert!(refs.iter().any(|(l, r)| l.starts_with("Document:") && *r == MatchRef::Document(1)), "{refs:?}");
+        assert!(refs.iter().all(|(_, r)| *r != MatchRef::Document(0)), "never the active document itself");
+    }
+
+    #[test]
+    fn matching_through_the_panels_params_adds_a_lookup_layer() {
+        let mut a = app();
+        a.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+        a.run("file.new", json!({"width": 8, "height": 8, "background": "#e05010"})).unwrap();
+        a.run("document.activate", json!({"document": 0})).unwrap();
+        let n = a.session.active().unwrap().doc.layers.len();
+        a.run("layer.newColorMatchLayer", json!({"strength": 100.0, "matchContrast": false, "method": "covariance", "source": 1})).unwrap();
+        assert_eq!(a.session.active().unwrap().doc.layers.len(), n + 1);
     }
 }

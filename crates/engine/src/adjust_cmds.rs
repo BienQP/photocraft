@@ -346,7 +346,7 @@ fn replace_color(s: &mut Session, p: &Value) -> Result<Value> {
 /// Pixels plus an optional coverage mask.
 type Sample = (Vec<[f32; 4]>, Option<Vec<f32>>);
 
-fn stats_pixels(doc: &Document, layer: Option<u64>, use_selection: bool) -> Result<Sample> {
+pub(crate) fn stats_pixels(doc: &Document, layer: Option<u64>, use_selection: bool) -> Result<Sample> {
     let area = doc.bounds();
     let px: Vec<[f32; 4]> = match layer {
         Some(id) => {
