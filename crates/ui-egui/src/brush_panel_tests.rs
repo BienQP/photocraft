@@ -1,5 +1,6 @@
 use egui::vec2;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use photocraft_engine::paint::{Control, GrayTile, MaskMode, Pattern, PatternStyle, TipShape};
 
 use super::*;
@@ -770,6 +771,44 @@ fn brushes_panel_groups_collapse_and_filter() {
     h.state_mut().ui.brushes_panel.filter = first.to_uppercase();
     h.run_steps(2);
     assert!(brush_preview::render_count(&ctx) >= n);
+}
+
+/// Swift Brush: a tag chip appears for tags in use, clicking it filters the list to the tagged
+/// presets, and clicking again clears the filter.
+#[test]
+fn swift_brush_tag_chips_filter_the_list() {
+    let mut h = harness(1, 0);
+    assert!(h.state().session.tools.presets.iter().any(|p| p.name == "Soft Round") && h.state().session.tools.presets.iter().any(|p| p.name == "Hard Round"));
+    assert!(h.query_by_label("#wet").is_none(), "no tags, no chips");
+    h.state_mut().ui.brushes_panel.swift.set_tag("Soft Round", "wet", true);
+    h.run_steps(3);
+    assert!(h.query_by_label("Hard Round").is_some());
+    h.get_by_label("#wet").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.brushes_panel.filter, "#wet");
+    assert!(h.query_by_label("Soft Round").is_some(), "the tagged preset stays");
+    assert!(h.query_by_label("Hard Round").is_none(), "the others go");
+    h.get_by_label("#wet").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.brushes_panel.filter, "");
+    assert!(h.query_by_label("Hard Round").is_some());
+    // Tags of a deleted preset are forgotten.
+    h.state_mut().run("brush.presets.delete", json!({"name": "Soft Round"})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().ui.brushes_panel.swift.tags.is_empty());
+    assert!(h.query_by_label("#wet").is_none());
+}
+
+/// The panel state round-trips with the new Swift Brush data, and older saves still load.
+#[test]
+fn swift_brush_state_serialises_and_old_state_loads() {
+    let mut st = BrushesPanelState::default();
+    st.swift.set_tag("Chalk", "dry", true);
+    st.swift.set_color("General", Some([1, 2, 3]));
+    let back: BrushesPanelState = serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
+    assert_eq!(back, st);
+    let old: BrushesPanelState = serde_json::from_value(json!({"filter": "x"})).unwrap();
+    assert!(old.swift.tags.is_empty() && old.swift.group_colors.is_empty());
 }
 
 fn kit(name: &str, folder: &[&str]) -> paint::BrushPreset {

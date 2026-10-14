@@ -71,6 +71,10 @@ pub enum Action {
     BeginRename(Renaming),
     /// Commit a rename typed in the rename bar.
     Rename(Renaming),
+    /// View only: give a group a colour (or clear it); applied to `swift` by [`preset_list`].
+    SetGroupColor { key: String, color: Option<[u8; 3]> },
+    /// View only: add or remove a tag on a preset.
+    SetTag { name: String, tag: String, on: bool },
     Delete(String),
     /// Delete a group (`folder` empty) or one of its nested folders, with their presets.
     DeleteGroup {
@@ -212,6 +216,14 @@ fn view_actions(st: &mut BrushesPanelState, acts: Vec<Action>) -> Vec<Action> {
                 st.renaming = Some(r);
                 None
             }
+            Action::SetGroupColor { key, color } => {
+                st.swift.set_color(&key, color);
+                None
+            }
+            Action::SetTag { name, tag, on } => {
+                st.swift.set_tag(&name, &tag, on);
+                None
+            }
             a => Some(a),
         })
         .collect()
@@ -228,7 +240,7 @@ pub fn apply(app: &mut PhotocraftApp, acts: Vec<Action>) {
                     run_or_status(app, "tools.setBrush", json!({ "preset": name }));
                 }
             }
-            Action::ToggleGroup(_) | Action::BeginRename(_) => {}
+            Action::ToggleGroup(_) | Action::BeginRename(_) | Action::SetGroupColor { .. } | Action::SetTag { .. } => {}
             Action::Move { name, group, folder, index } => {
                 let mut p = json!({ "name": name, "group": group });
                 if let Some(f) = folder {
@@ -318,6 +330,25 @@ fn preset_interactions(ui: &egui::Ui, resp: &egui::Response, r: egui::Rect, p: &
             acts.push(Action::BeginRename(Renaming { group: false, name: p.name.clone(), folder: Vec::new(), text: String::new() }));
             ui.close();
         }
+        ui.separator();
+        ui.label(RichText::new("Tags").size(11.0));
+        let meta = swift(ui);
+        let mine = meta.tags_of(&p.name);
+        for tag in meta.all_tags() {
+            let on = mine.contains(&tag);
+            if ui.selectable_label(on, format!("#{tag}")).clicked() {
+                acts.push(Action::SetTag { name: p.name.clone(), tag, on: !on });
+            }
+        }
+        let new_id = ui.id().with(("new-tag", &p.name));
+        let mut text: String = ui.data(|d| d.get_temp(new_id)).unwrap_or_default();
+        let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("New tag…").desired_width(110.0));
+        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            acts.push(Action::SetTag { name: p.name.clone(), tag: std::mem::take(&mut text), on: true });
+            ui.close();
+        }
+        ui.data_mut(|d| d.insert_temp(new_id, text));
+        ui.separator();
         if ui.button(tl!("Delete Brush")).clicked() {
             acts.push(Action::Delete(p.name.clone()));
             ui.close();
@@ -636,6 +667,15 @@ pub fn folder_drop(src_group: &str, src_folder: &[String], group: &str, folder: 
     }
 }
 
+/// Where [`preset_list`] leaves the Swift Brush data for the rows and headers it draws.
+fn swift_id() -> egui::Id {
+    egui::Id::new("swift-brush-meta")
+}
+
+fn swift(ui: &egui::Ui) -> std::sync::Arc<crate::brush_swift::SwiftBrush> {
+    ui.data(|d| d.get_temp(swift_id())).unwrap_or_default()
+}
+
 /// A group's or nested folder's header: chevron, folder, name, count. Click toggles; a group or
 /// folder dragged here lands before it (its upper edge) or goes into it ([`folder_drop`]); a
 /// preset dropped here moves to the end of the group or folder. `key` is the group key, `folder` the nested folder's path (empty for the
@@ -647,6 +687,11 @@ fn group_header(ui: &mut egui::Ui, label: &str, key: &str, folder: &[String], op
         ui.painter().rect_filled(r, t.radius_sm, t.hover);
     }
     let shown = folder.last().map_or(label, String::as_str);
+    let tint = if folder.is_empty() { swift(ui).color(key) } else { None };
+    if let Some([cr, cg, cb]) = tint {
+        ui.painter().rect_filled(r, t.radius_sm, Color32::from_rgba_unmultiplied(cr, cg, cb, 38));
+        ui.painter().rect_filled(egui::Rect::from_min_max(r.min, pos2(r.left() + 3.0, r.bottom())), 0.0, Color32::from_rgb(cr, cg, cb));
+    }
     let x = r.left() + 4.0 + FOLDER_INDENT * folder.len().min(MAX_VIEW_DEPTH) as f32;
     icons::paint(
         ui,
@@ -700,6 +745,29 @@ fn group_header(ui: &mut egui::Ui, label: &str, key: &str, folder: &[String], op
         if ui.button(tl!("Rename Group…")).clicked() {
             acts.push(Action::BeginRename(Renaming { group: true, name: key.to_string(), folder: folder.to_vec(), text: String::new() }));
             ui.close();
+        }
+        if folder.is_empty() {
+            ui.separator();
+            ui.label(RichText::new("Colour").size(11.0));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (name, c) in crate::brush_swift::PALETTE {
+                    let (sw, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    ui.painter().rect_filled(sw, 3.0, Color32::from_rgb(c[0], c[1], c[2]));
+                    if tint == Some(c) {
+                        ui.painter().rect_stroke(sw, 3.0, Stroke::new(1.5, t.text), egui::StrokeKind::Outside);
+                    }
+                    if resp.on_hover_text(name).clicked() {
+                        acts.push(Action::SetGroupColor { key: key.to_string(), color: Some(c) });
+                        ui.close();
+                    }
+                }
+            });
+            if tint.is_some() && ui.button("No colour").clicked() {
+                acts.push(Action::SetGroupColor { key: key.to_string(), color: None });
+                ui.close();
+            }
+            ui.separator();
         }
         if ui.button(tl!("Delete Group")).clicked() {
             acts.push(Action::DeleteGroup { group: key.to_string(), folder: folder.to_vec() });
@@ -868,11 +936,13 @@ pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&
     let grid = st.view == BrushesView::Grid;
     let show = (st.show_name, st.show_stroke, st.show_tip);
     let collapsed = &st.collapsed;
+    let meta = std::sync::Arc::new(st.swift.clone());
+    ui.data_mut(|d| d.insert_temp(swift_id(), meta.clone()));
     egui::ScrollArea::vertical().id_salt(layout.id).max_height(layout.max_height).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         for (label, items) in grouped_presets(presets) {
             let items: Vec<&BrushPreset> =
-                items.into_iter().filter_map(|i| presets.get(i)).filter(|p| filter.is_empty() || p.name.to_lowercase().contains(&filter)).collect();
+                items.into_iter().filter_map(|i| presets.get(i)).filter(|p| crate::brush_swift::matches(&p.name, meta.tags_of(&p.name), &filter)).collect();
             if items.is_empty() {
                 continue;
             }
@@ -916,6 +986,29 @@ pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&
     view_actions(st, acts)
 }
 
+/// Swift Brush: one chip per tag in use; clicking one adds or removes `#tag` in the search box.
+fn tag_chips(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let names: Vec<&str> = app.session.tools.presets.iter().map(|p| p.name.as_str()).collect();
+    let groups: Vec<String> = app.session.tools.presets.iter().map(|p| p.group.clone()).collect();
+    let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+    app.ui.brushes_panel.swift.retain_known(&names, &groups);
+    let tags = app.ui.brushes_panel.swift.all_tags();
+    if tags.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+        for tag in tags {
+            let on = app.ui.brushes_panel.filter.split_whitespace().any(|w| w.eq_ignore_ascii_case(&format!("#{tag}")));
+            if ui.selectable_label(on, format!("#{tag}")).clicked() {
+                let f = crate::brush_swift::toggle_tag_filter(&app.ui.brushes_panel.filter, &tag);
+                app.ui.brushes_panel.filter = f;
+            }
+        }
+    });
+}
+
 /// The Brushes tab.
 pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -957,6 +1050,7 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         });
     });
+    tag_chips(app, ui);
     ui.add_space(6.0);
     let acts = preset_list(ui, &app.session.tools.presets, app.session.tools.current_preset.as_deref(), &mut app.ui.brushes_panel, PANEL_LIST);
     apply(app, acts);

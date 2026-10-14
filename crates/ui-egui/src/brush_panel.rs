@@ -107,6 +107,8 @@ pub struct BrushesPanelState {
     /// Quick controls: the brush properties the Brushes panel shows as sliders
     /// ([`crate::brush_quick`]).
     pub quick: Vec<String>,
+    /// Swift Brush: group colours and preset tags ([`crate::brush_swift`]).
+    pub swift: crate::brush_swift::SwiftBrush,
 }
 
 impl Default for BrushesPanelState {
@@ -121,6 +123,7 @@ impl Default for BrushesPanelState {
             show_tip: true,
             scale: 1.0,
             quick: crate::brush_quick::default_quick(),
+            swift: Default::default(),
         }
     }
 }

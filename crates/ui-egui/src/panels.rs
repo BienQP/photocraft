@@ -6284,7 +6284,7 @@ mod properties_target_regressions {
     }
 }
 
-/// One reference choice for Colour match: another open document, or a layer of this one.
+/// One reference choice for Swift Match: another open document, or a layer of this one.
 #[derive(Clone, Debug, PartialEq)]
 enum MatchRef {
     Document(usize),
@@ -6311,14 +6311,15 @@ fn match_references(app: &PhotocraftApp) -> Vec<(String, MatchRef)> {
     out
 }
 
-/// Colour match: move this picture's colours toward a reference, keeping its own lighting, as a
+/// Swift Match: move this picture's colours toward a reference, keeping its own lighting, as a
 /// non-destructive Color Lookup layer (engine `layer.newColorMatchLayer`).
 fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new("Colour match").id_salt("swift-colour-match").default_open(false).show(ui, |ui| {
+    egui::CollapsingHeader::new("Swift Match").id_salt("swift-colour-match").default_open(false).show(ui, |ui| {
         let refs = match_references(app);
         let key = egui::Id::new("swift-colour-match-state");
         // (reference index, strength %, match contrast, mean-only method)
-        let (mut pick, mut strength, mut contrast, mut mean): (usize, f32, bool, bool) = ui.data(|d| d.get_temp(key)).unwrap_or((0, 100.0, false, false));
+        let (mut pick, mut strength, mut contrast, mut mean, mut guide_ref, mut guide_pic): (usize, f32, bool, bool, bool, bool) =
+            ui.data(|d| d.get_temp(key)).unwrap_or((0, 100.0, false, false, false, false));
         pick = pick.min(refs.len().saturating_sub(1));
         if refs.is_empty() {
             ui.label(RichText::new("Open a second image, or add a reference layer.").size(11.0));
@@ -6335,11 +6336,18 @@ fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         crate::widgets::slider_row(ui, "Strength", &mut strength, 0.0..=100.0, "%", None);
         ui.checkbox(&mut contrast, "Match contrast").on_hover_text("Also take the reference's tonal range. Off keeps this picture's own lighting.");
         ui.checkbox(&mut mean, "Average colour only").on_hover_text("Shift and scale each colour axis separately: simpler, gentler than the full match.");
-        ui.data_mut(|d| d.insert_temp(key, (pick, strength, contrast, mean)));
+        ui.checkbox(&mut guide_ref, "Reference: selection only").on_hover_text("Sample only the selected area of the reference, to pick which colours it lends.");
+        ui.checkbox(&mut guide_pic, "Picture: selection only").on_hover_text("Measure only the selected area of this picture, to pick which colours get corrected.");
+        ui.data_mut(|d| d.insert_temp(key, (pick, strength, contrast, mean, guide_ref, guide_pic)));
+        ui.horizontal(|ui| {
+            if ui.button("Save LUT…").on_hover_text("Export › Color Lookup Tables: bakes the visible lookup layers, including Swift Match, to .cube").clicked() {
+                let _ = crate::menus::invoke(app, ui.ctx(), "file.export.colorLookupTables", json!({}));
+            }
+        });
         if ui.button("Match colours").on_hover_text("Adds a Color Lookup layer; mask it, fade it, or hide it afterwards").clicked()
             && let Some((_, r)) = refs.get(pick)
         {
-            let mut params = json!({"strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }});
+            let mut params = json!({"strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }, "useSelectionInSource": guide_ref, "useSelectionInTarget": guide_pic});
             match r {
                 MatchRef::Document(i) => params["source"] = json!(i),
                 MatchRef::Layer(id) => params["sourceLayer"] = json!(id),

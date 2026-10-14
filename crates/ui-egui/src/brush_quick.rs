@@ -101,7 +101,7 @@ pub fn toggle(list: &mut Vec<String>, id: &str) {
 /// Draw the mini panel and apply edits to the current brush.
 pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::CollapsingHeader::new(RichText::new("Quick controls").color(t.text_dim)).id_salt("brush-quick-controls").default_open(false).show(ui, |ui| {
+    egui::CollapsingHeader::new(RichText::new("Swift Brush").color(t.text_dim)).id_salt("brush-quick-controls").default_open(false).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
             for p in PROPS {
