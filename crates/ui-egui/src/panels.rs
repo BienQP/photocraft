@@ -3562,8 +3562,8 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     wheel_controls(app, ui);
 }
 
-/// The Color panel's view switch: spectrum field or colour wheel, with the wheel's hue-wheel and
-/// harmony choices.
+/// The Color panel's view switch: spectrum field or Swift Panel, with the wheel's hue-wheel,
+/// harmony and slider choices.
 fn wheel_controls(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     use crate::color_wheel::WheelKind;
     use photocraft_color::wheel::Harmony;
@@ -3576,14 +3576,24 @@ fn wheel_controls(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if ui.selectable_label(cp.wheel, "Swift Panel").clicked() {
             cp.wheel = true;
         }
-        if cp.wheel {
-            egui::ComboBox::from_id_salt("color-wheel-kind").width(52.0).selected_text(if cp.wheel_kind == WheelKind::Hsb { "HSB" } else { "RYB" }).show_ui(
-                ui,
-                |ui| {
-                    ui.selectable_value(&mut cp.wheel_kind, WheelKind::Hsb, "HSB (screen)");
-                    ui.selectable_value(&mut cp.wheel_kind, WheelKind::Ryb, "RYB (painter)");
-                },
-            );
+    });
+    if !app.ui.color_panel.wheel {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let cp = &mut app.ui.color_panel;
+        {
+            let kind_name = match cp.wheel_kind {
+                WheelKind::Hsb => "HSB",
+                WheelKind::Ryb => "RYB",
+                WheelKind::Oklch => "OKLCH",
+            };
+            egui::ComboBox::from_id_salt("color-wheel-kind").width(56.0).selected_text(kind_name).show_ui(ui, |ui| {
+                ui.selectable_value(&mut cp.wheel_kind, WheelKind::Hsb, "HSB (screen)");
+                ui.selectable_value(&mut cp.wheel_kind, WheelKind::Ryb, "RYB (painter)");
+                ui.selectable_value(&mut cp.wheel_kind, WheelKind::Oklch, "OKLCH (perceptual)");
+            });
             let cur = usize::from(cp.harmony).checked_sub(1).and_then(|i| Harmony::ALL.get(i)).map_or("No harmony", |h| h.label());
             egui::ComboBox::from_id_salt("color-wheel-harmony").width(78.0).selected_text(cur).show_ui(ui, |ui| {
                 ui.selectable_value(&mut cp.harmony, 0, "No harmony");
@@ -3591,67 +3601,256 @@ fn wheel_controls(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     ui.selectable_value(&mut cp.harmony, i as u8 + 1, hm.label());
                 }
             });
+            let sl = ["No sliders", "RGB", "HSB", "Lab", "CMYK"];
+            egui::ComboBox::from_id_salt("color-wheel-sliders")
+                .width(70.0)
+                .selected_text(sl.get(usize::from(cp.sliders)).copied().unwrap_or("No sliders"))
+                .show_ui(ui, |ui| {
+                    for (i, name) in sl.iter().enumerate() {
+                        ui.selectable_value(&mut cp.sliders, i as u8, *name);
+                    }
+                });
         }
     });
 }
 
-/// The colour wheel view of the Color panel: chips, the wheel, a row of harmony swatches and the
-/// hex/RGB readout. Edits go to the foreground or background colour like the spectrum field.
+/// Put `rgb` first in the colour history.
+fn push_color_history(cp: &mut crate::state::ColorPanelState, rgb: [f32; 3]) {
+    cp.remember(srgb_bytes([rgb[0], rgb[1], rgb[2], 1.0]));
+}
+
+fn set_tool_color(app: &mut PhotocraftApp, background: bool, rgb: [f32; 3]) {
+    if background {
+        app.session.tools.background = [rgb[0], rgb[1], rgb[2], 1.0];
+    } else {
+        app.session.tools.foreground = [rgb[0], rgb[1], rgb[2], 1.0];
+        crate::type_tool::foreground_changed(app);
+    }
+}
+
+/// A set of numeric sliders for one colour model. `from` and `to` convert sRGB ↔ the model's
+/// values; the last edited values are kept while they still give the colour, so a grey or black
+/// doesn't reset what was just typed. Returns the new sRGB colour and whether the edit finished.
+fn model_sliders<const N: usize>(
+    ui: &mut egui::Ui,
+    fg: [f32; 3],
+    id: egui::Id,
+    rows: [(&str, std::ops::RangeInclusive<f32>, &str); N],
+    from: impl Fn([f32; 3]) -> [f32; N],
+    to: impl Fn([f32; N]) -> [f32; 3],
+) -> Option<([f32; 3], bool)> {
+    let bytes = |c: [f32; 3]| srgb_bytes([c[0], c[1], c[2], 1.0]);
+    let stored: Option<[f32; N]> = ui.data(|d| d.get_temp(id));
+    let mut vals = stored.filter(|v| bytes(to(*v)) == bytes(fg)).unwrap_or_else(|| from(fg));
+    let (mut changed, mut released) = (false, false);
+    for (v, (label, range, unit)) in vals.iter_mut().zip(rows) {
+        let r = widgets::slider_row(ui, label, v, range, unit, None);
+        changed |= r.changed();
+        released |= r.drag_stopped() || r.lost_focus();
+    }
+    if !changed {
+        return None;
+    }
+    ui.data_mut(|d| d.insert_temp(id, vals));
+    Some((to(vals).map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }), released))
+}
+
+/// The Swift Panel (colour wheel) view of the Color panel: chips, the wheel, harmony swatches,
+/// colour history, hex/RGB readout, a temperature slider and optional numeric sliders. Edits go
+/// to the foreground or background colour like the spectrum field.
 fn color_wheel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, hsva: egui::ecolor::Hsva, key: egui::Id, w: f32, h: f32) {
     use crate::color_wheel as cw;
+    use photocraft_color::convert::{cmyk_to_rgb, lab_to_srgb, rgb_to_cmyk, srgb_to_lab};
+    use photocraft_color::wheel::{kelvin_to_srgb, srgb_to_oklch};
     let t = Tokens::get(ui.ctx());
     let bg_active = app.ui.color_panel.background;
     let kind = app.ui.color_panel.wheel_kind;
     let scheme = usize::from(app.ui.color_panel.harmony).checked_sub(1).and_then(|i| photocraft_color::wheel::Harmony::ALL.get(i)).copied();
-    let mut hsb = [hsva.h * 360.0, hsva.s, hsva.v];
-    let mut edited: Option<[f32; 3]> = None;
+    let fg4 = if bg_active { app.session.tools.background } else { app.session.tools.foreground };
+    let fg = [fg4[0], fg4[1], fg4[2]];
+    let bytes = |c: [f32; 3]| srgb_bytes([c[0], c[1], c[2], 1.0]);
     let size = (w - 38.0 - 8.0).min(h.max(120.0) + 40.0).clamp(96.0, 260.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (chips, _) = ui.allocate_exact_size(vec2(38.0, size), Sense::hover());
-        field_chips(app, ui, chips);
-        edited = cw::wheel(ui, size, hsb, kind, scheme, t.separator).hsb;
-    });
-    if let Some(s) = scheme {
+
+    // What the wheel (or a swatch, slider or history entry) set this frame: the colour, whether
+    // the edit finished, and the OKLCH values to remember.
+    let mut picked: Option<[f32; 3]> = None;
+    let mut released = false;
+    let mut swatches: Vec<[f32; 3]> = Vec::new();
+    let lch_key = egui::Id::new(("color-wheel-lch", bg_active));
+    let mut new_lch: Option<[f32; 3]> = None;
+
+    if kind == cw::WheelKind::Oklch {
+        let stored: Option<[f32; 3]> = ui.data(|d| d.get_temp(lch_key));
+        let mut lch = stored.filter(|l| bytes(cw::oklch_rgb(*l)) == bytes(fg)).unwrap_or_else(|| {
+            let mut l = srgb_to_oklch(fg);
+            if l[1] < 1e-3 {
+                l[2] = stored.map_or(0.0, |s| s[2]);
+            }
+            l
+        });
+        lch[1] = lch[1].min(cw::OKLCH_MAX_CHROMA);
+        let mut edit = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (chips, _) = ui.allocate_exact_size(vec2(38.0, size), Sense::hover());
+            field_chips(app, ui, chips);
+            edit = Some(cw::oklch_wheel(ui, size, lch, scheme, t.separator));
+        });
+        if let Some(e) = edit {
+            released = e.released;
+            if let Some(l) = e.lch {
+                picked = Some(cw::oklch_rgb(l));
+                new_lch = Some(l);
+                lch = l;
+            }
+        }
+        if let Some(s) = scheme {
+            swatches = cw::oklch_harmony_colors(s, lch).into_iter().map(cw::oklch_rgb).collect();
+        }
+    } else {
+        let mut hsb = [hsva.h * 360.0, hsva.s, hsva.v];
+        let mut edit = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (chips, _) = ui.allocate_exact_size(vec2(38.0, size), Sense::hover());
+            field_chips(app, ui, chips);
+            edit = Some(cw::wheel(ui, size, hsb, kind, scheme, t.separator));
+        });
+        if let Some(e) = edit {
+            released = e.released;
+            if let Some(v) = e.hsb {
+                hsb = v;
+                picked = Some(crate::color_picker_ui::hsv_to_rgb(v[0], v[1], v[2]));
+            }
+        }
+        if let Some(s) = scheme {
+            swatches = cw::harmony_colors(s, kind, hsb).into_iter().map(|c| crate::color_picker_ui::hsv_to_rgb(c[0], c[1], c[2])).collect();
+        }
+    }
+
+    // Harmony swatches: a click applies the colour.
+    if !swatches.is_empty() {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for col in cw::harmony_colors(s, kind, edited.unwrap_or(hsb)) {
-                let [r, g, b] = crate::color_picker_ui::hsv_to_rgb(col[0], col[1], col[2]);
+            for rgb in &swatches {
                 let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-                ui.painter().rect_filled(rect, 2.0, c32([r, g, b, 1.0]));
+                ui.painter().rect_filled(rect, 2.0, c32([rgb[0], rgb[1], rgb[2], 1.0]));
                 ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
                 if resp.clicked() {
-                    edited = Some(col);
+                    picked = Some(*rgb);
+                    released = true;
                 }
             }
         });
     }
-    if let Some(e) = edited {
-        hsb = e;
-        let [r, g, b] = crate::color_picker_ui::hsv_to_rgb(hsb[0], hsb[1], hsb[2]);
-        if bg_active {
-            app.session.tools.background = [r, g, b, 1.0];
-        } else {
-            app.session.tools.foreground = [r, g, b, 1.0];
-            crate::type_tool::foreground_changed(app);
-        }
-        ui.data_mut(|d| d.insert_temp(key, (hsb[0] / 360.0, hsb[1])));
+
+    // Colour history.
+    let cp = app.ui.color_panel;
+    let n = usize::from(cp.history_len).min(cp.history.len());
+    if n > 0 {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            for c in cp.history.iter().take(n) {
+                let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+                ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+                if resp.on_hover_text(format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).clicked() {
+                    picked = Some([c[0], c[1], c[2]].map(|v| f32::from(v) / 255.0));
+                }
+            }
+        });
     }
+
+    // Hex / RGB readout.
     ui.add_space(6.0);
-    let mut c = if bg_active { app.session.tools.background } else { app.session.tools.foreground };
+    let mut c = fg4;
     if color_readout(ui, ui.id().with(("color-wheel", bg_active)), &mut c) {
-        if bg_active {
-            app.session.tools.background = c;
-        } else {
-            app.session.tools.foreground = c;
-            crate::type_tool::foreground_changed(app);
-        }
-        let hh = srgb_hsva(c);
+        picked = Some([c[0], c[1], c[2]]);
+        released = true;
+    }
+
+    // Temperature.
+    ui.add_space(4.0);
+    let kid = egui::Id::new("color-wheel-kelvin");
+    let mut kelvin: f32 = ui.data(|d| d.get_temp(kid)).unwrap_or(6500.0);
+    let stops: Vec<Color32> = (0..=10).map(|i| rgb32c(kelvin_to_srgb(1500.0 + 10500.0 * i as f32 / 10.0))).collect();
+    let kr = widgets::slider_row(ui, "Temperature", &mut kelvin, 1500.0..=12000.0, " K", Some(&stops));
+    if kr.changed() {
+        ui.data_mut(|d| d.insert_temp(kid, kelvin));
+        picked = Some(kelvin_to_srgb(kelvin));
+        released |= kr.drag_stopped() || kr.lost_focus();
+    }
+
+    // Numeric sliders.
+    let sid = egui::Id::new(("color-wheel-sliders", bg_active, app.ui.color_panel.sliders));
+    let fgnow = picked.unwrap_or(fg);
+    let slid = match app.ui.color_panel.sliders {
+        1 => model_sliders(
+            ui,
+            fgnow,
+            sid,
+            [("R", 0.0..=255.0, ""), ("G", 0.0..=255.0, ""), ("B", 0.0..=255.0, "")],
+            |c| c.map(|v| v * 255.0),
+            |v| v.map(|x| x / 255.0),
+        ),
+        2 => model_sliders(
+            ui,
+            fgnow,
+            sid,
+            [("H", 0.0..=360.0, "°"), ("S", 0.0..=100.0, "%"), ("B", 0.0..=100.0, "%")],
+            |c| {
+                let v = crate::color_picker_ui::rgb_to_hsv(c);
+                [v[0], v[1] * 100.0, v[2] * 100.0]
+            },
+            |v| crate::color_picker_ui::hsv_to_rgb(v[0], v[1] / 100.0, v[2] / 100.0),
+        ),
+        3 => model_sliders(ui, fgnow, sid, [("L", 0.0..=100.0, ""), ("a", -128.0..=127.0, ""), ("b", -128.0..=127.0, "")], srgb_to_lab, lab_to_srgb),
+        4 => model_sliders(
+            ui,
+            fgnow,
+            sid,
+            [("C", 0.0..=100.0, "%"), ("M", 0.0..=100.0, "%"), ("Y", 0.0..=100.0, "%"), ("K", 0.0..=100.0, "%")],
+            |c| rgb_to_cmyk(c).map(|v| v * 100.0),
+            |v| cmyk_to_rgb(v.map(|x| x / 100.0)),
+        ),
+        _ => None,
+    };
+    if let Some((rgb, rel)) = slid {
+        picked = Some(rgb);
+        released |= rel;
+    }
+
+    // Apply.
+    if let Some(rgb) = picked {
+        set_tool_color(app, bg_active, rgb);
+        let hh = srgb_hsva(c32to4(rgb));
         if hh.s >= 0.01 && hh.v >= 0.01 {
             ui.data_mut(|d| d.insert_temp(key, (hh.h, hh.s)));
         }
+        let l = new_lch.unwrap_or_else(|| {
+            let mut l = srgb_to_oklch(rgb);
+            if l[1] < 1e-3 {
+                l[2] = ui.data(|d| d.get_temp::<[f32; 3]>(lch_key)).map_or(0.0, |s| s[2]);
+            }
+            l
+        });
+        ui.data_mut(|d| d.insert_temp(lch_key, l));
+        if released {
+            push_color_history(&mut app.ui.color_panel, rgb);
+        }
     }
+    ui.add_space(4.0);
+}
+
+fn rgb32c(c: [f32; 3]) -> Color32 {
+    let [r, g, b] = srgb_bytes([c[0], c[1], c[2], 1.0]);
+    Color32::from_rgb(r, g, b)
+}
+
+fn c32to4(c: [f32; 3]) -> [f32; 4] {
+    [c[0], c[1], c[2], 1.0]
 }
 
 /// Tool colours are sRGB-encoded floats; egui's Hsva works on sRGB bytes via these helpers

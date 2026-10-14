@@ -1045,6 +1045,52 @@ pub struct ColorPanelState {
     pub wheel_kind: crate::color_wheel::WheelKind,
     /// Harmony markers: `0` off, otherwise 1 + the index into `Harmony::ALL`.
     pub harmony: u8,
+    /// Recently used colours, newest first (sRGB bytes); `history_len` of them are valid.
+    pub history: [[u8; 3]; 12],
+    pub history_len: u8,
+    /// Slider set under the wheel: `0` off, 1 RGB, 2 HSB, 3 Lab, 4 CMYK.
+    pub sliders: u8,
+}
+
+impl ColorPanelState {
+    /// Put `c` first in the colour history, dropping an equal entry and keeping the newest 12.
+    pub fn remember(&mut self, c: [u8; 3]) {
+        let n = usize::from(self.history_len).min(self.history.len());
+        if n > 0 && self.history.first() == Some(&c) {
+            return;
+        }
+        let mut list: Vec<[u8; 3]> = self.history.iter().take(n).copied().filter(|x| *x != c).collect();
+        list.insert(0, c);
+        list.truncate(self.history.len());
+        for (slot, x) in self.history.iter_mut().zip(&list) {
+            *slot = *x;
+        }
+        self.history_len = list.len() as u8;
+    }
+}
+
+#[cfg(test)]
+mod color_history_tests {
+    use super::ColorPanelState;
+
+    #[test]
+    fn history_is_newest_first_deduped_and_capped() {
+        let mut cp = ColorPanelState::default();
+        cp.remember([1, 1, 1]);
+        cp.remember([2, 2, 2]);
+        cp.remember([1, 1, 1]);
+        assert_eq!(cp.history_len, 2);
+        assert_eq!(&cp.history[..2], &[[1, 1, 1], [2, 2, 2]]);
+        for i in 0..40u8 {
+            cp.remember([i, 9, 9]);
+        }
+        assert_eq!(usize::from(cp.history_len), cp.history.len());
+        assert_eq!(cp.history[0], [39, 9, 9]);
+        // A corrupt length from a saved file never indexes past the array.
+        cp.history_len = 255;
+        cp.remember([5, 5, 5]);
+        assert!(usize::from(cp.history_len) <= cp.history.len());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
