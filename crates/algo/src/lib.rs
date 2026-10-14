@@ -40,6 +40,7 @@ mod image;
 pub mod inpaint;
 pub mod lens;
 pub mod liquify;
+pub mod luminosity;
 pub mod magnetic;
 pub mod matting;
 mod noise;

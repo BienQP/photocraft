@@ -3842,6 +3842,51 @@ fn color_wheel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, hsva: egui::ecol
         }
     }
     ui.add_space(4.0);
+    luminosity_section(app, ui);
+}
+
+/// Luminosity masks: buttons for Lights, Darks, Mids and the eleven zones. Each runs the engine's
+/// `select.luminosity`, combined with the current selection by the chosen mode.
+fn luminosity_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Luminosity masks").id_salt("swift-luminosity").default_open(false).show(ui, |ui| {
+        const MODES: [(&str, &str); 4] = [("replace", "New"), ("add", "Add"), ("subtract", "Subtract"), ("intersect", "Intersect")];
+        let mid = egui::Id::new("swift-luminosity-mode");
+        let mut mode: usize = ui.data(|d| d.get_temp(mid)).unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (i, (_, name)) in MODES.iter().enumerate() {
+                if ui.selectable_label(mode == i, *name).clicked() {
+                    mode = i;
+                }
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(mid, mode));
+        let mode_name = MODES.get(mode).map_or("replace", |m| m.0);
+        let mut run = |ui: &egui::Ui, params: Value| {
+            let _ = ui;
+            let _ = app.run("select.luminosity", params);
+        };
+        let row = |ui: &mut egui::Ui, title: &str, kind: &str, levels: std::ops::RangeInclusive<u32>, run: &mut dyn FnMut(&egui::Ui, Value)| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.label(RichText::new(title).size(11.0));
+                for n in levels {
+                    let (label, params) = if kind == "zone" {
+                        (format!("{n}"), json!({"kind": "zone", "zone": n, "mode": mode_name}))
+                    } else {
+                        (format!("{n}"), json!({"kind": kind, "level": n, "mode": mode_name}))
+                    };
+                    if ui.small_button(label).on_hover_text(format!("{title} {n}: {}", MODES.get(mode).map_or("", |m| m.1))).clicked() {
+                        run(ui, params);
+                    }
+                }
+            });
+        };
+        row(ui, "Lights", "lights", 1..=4, &mut run);
+        row(ui, "Darks", "darks", 1..=4, &mut run);
+        row(ui, "Mids", "mids", 1..=3, &mut run);
+        row(ui, "Zones", "zone", 0..=10, &mut run);
+    });
 }
 
 fn rgb32c(c: [f32; 3]) -> Color32 {
