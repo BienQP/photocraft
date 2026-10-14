@@ -3864,8 +3864,13 @@ fn luminosity_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         });
         ui.data_mut(|d| d.insert_temp(mid, mode));
         let mode_name = MODES.get(mode).map_or("replace", |m| m.0);
-        let mut run = |ui: &egui::Ui, params: Value| {
+        let fid = egui::Id::new("swift-luminosity-feather");
+        let mut feather: f32 = ui.data(|d| d.get_temp(fid)).unwrap_or(0.0);
+        crate::widgets::slider_row(ui, "Feather", &mut feather, 0.0..=100.0, "px", None);
+        ui.data_mut(|d| d.insert_temp(fid, feather));
+        let mut run = |ui: &egui::Ui, mut params: Value| {
             let _ = ui;
+            params["feather"] = json!(feather);
             let _ = app.run("select.luminosity", params);
         };
         let row = |ui: &mut egui::Ui, title: &str, kind: &str, levels: std::ops::RangeInclusive<u32>, run: &mut dyn FnMut(&egui::Ui, Value)| {
@@ -3888,6 +3893,14 @@ fn luminosity_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         row(ui, "Darks", "darks", 1..=4, &mut run);
         row(ui, "Mids", "mids", 1..=3, &mut run);
         row(ui, "Zones", "zone", 0..=10, &mut run);
+        ui.horizontal(|ui| {
+            if ui.button("Preview").on_hover_text("Edit in Quick Mask Mode: see the selection as an overlay (Q)").clicked() {
+                let _ = crate::menus::invoke(app, ui.ctx(), "select.editInQuickMaskMode", json!({}));
+            }
+            if ui.button("Save as channel…").on_hover_text("Select › Save Selection: keep the mask as a channel to reuse").clicked() {
+                let _ = crate::menus::invoke(app, ui.ctx(), "select.saveSelection", json!({}));
+            }
+        });
     });
 }
 

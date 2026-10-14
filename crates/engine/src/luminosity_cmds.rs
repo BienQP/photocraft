@@ -16,6 +16,8 @@ use crate::{EngineError, Result, Session};
 const CMD: &str = "select.luminosity";
 /// Rows read per band, so a huge document never holds a full-size float copy.
 const BAND_ROWS: i32 = 256;
+/// Largest feather radius in pixels.
+const MAX_FEATHER: f64 = 250.0;
 
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".into())
@@ -80,6 +82,10 @@ fn select_luminosity(s: &mut Session, p: &Value) -> Result<Value> {
         None | Some(Value::Null) => true,
         Some(v) => v.as_bool().ok_or_else(|| bad("`sampleAllLayers` must be true or false"))?,
     };
+    let feather = match p.get("feather") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64().filter(|n| n.is_finite() && (0.0..=MAX_FEATHER).contains(n)).ok_or_else(|| bad(format!("`feather` must be a number 0..{MAX_FEATHER}")))? as f32,
+    };
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let doc = d.doc.clone();
     let canvas = doc.bounds();
@@ -109,6 +115,11 @@ fn select_luminosity(s: &mut Session, p: &Value) -> Result<Value> {
     if mask.iter().all(|v| *v == 0) {
         return Ok(json!({ "selected": doc.selection.is_some(), "changed": false, "coverage": 0.0, "message": "No pixels in that range" }));
     }
+    if feather > 0.0 {
+        let soft: Vec<f32> = mask.iter().map(|v| f32::from(*v) / 255.0).collect();
+        let soft = photocraft_algo::selection::feather(&soft, canvas.width() as usize, canvas.height() as usize, feather);
+        mask = soft.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+    }
     let region = Region { bbox: canvas, mask };
     let name = label(spec);
     let selected = s.edit(&name, |doc, _| {
@@ -125,7 +136,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Luminosity Mask",
         menu: &["Select"],
         shortcut: None,
-        params: r##"{"kind":"lights|darks|mids|zone"="lights","level":1..8=1 (lights/darks/mids: higher = narrower),"zone":0..10=5 (kind zone: the eleven-zone scale),"mode":"replace|add|subtract|intersect"="replace","sampleAllLayers":bool=true} → {selected, changed, coverage (0–1 of the canvas), bounds}"##,
+        params: r##"{"kind":"lights|darks|mids|zone"="lights","level":1..8=1 (lights/darks/mids: higher = narrower),"zone":0..10=5 (kind zone: the eleven-zone scale),"mode":"replace|add|subtract|intersect"="replace","sampleAllLayers":bool=true,"feather":0..250 px=0 (softens the mask's edge before it is combined)} → {selected, changed, coverage (0–1 of the canvas), bounds}"##,
         enabled: has_doc,
         run: select_luminosity,
         journal: true,
@@ -211,6 +222,20 @@ mod tests {
         let r = s.execute(CMD, json!({"kind": "darks", "level": 8})).unwrap();
         assert_eq!(r["changed"], json!(false));
         assert!(s.active().unwrap().doc.selection.is_none());
+    }
+
+    #[test]
+    fn feathering_softens_the_edge_and_is_validated() {
+        let mut hard = ramp(8);
+        hard.execute(CMD, json!({"kind": "zone", "zone": 10})).unwrap();
+        let mut soft = ramp(8);
+        soft.execute(CMD, json!({"kind": "zone", "zone": 10, "feather": 6})).unwrap();
+        // Zone 10 is the bright end only: feathering lets some of it spill left of where the hard mask stops.
+        let probe = (0..100).rev().find(|&x| cov(&hard, x) == 0.0).unwrap_or(0);
+        assert!(cov(&soft, probe) > cov(&hard, probe), "{} vs {}", cov(&soft, probe), cov(&hard, probe));
+        for bad in [json!({"feather": -1}), json!({"feather": 1000}), json!({"feather": "x"})] {
+            assert!(soft.execute(CMD, bad.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]
