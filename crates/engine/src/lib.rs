@@ -70,6 +70,7 @@ pub mod lens_cmds;
 pub mod link_watch;
 pub mod colormatch_cmds;
 pub mod luminosity_cmds;
+pub mod swiftpaint_cmds;
 pub mod magnetic_cmds;
 pub mod mask_view_cmds;
 mod migrate_cmds;

@@ -3844,6 +3844,7 @@ fn color_wheel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, hsva: egui::ecol
     ui.add_space(4.0);
     luminosity_section(app, ui);
     color_match_section(app, ui);
+    swift_paint_section(app, ui);
 }
 
 /// Luminosity masks: buttons for Lights, Darks, Mids and the eleven zones. Each runs the engine's
@@ -6357,6 +6358,46 @@ fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Swift Paint: paints the picture as brush strokes, one layer per brush size, in a group
+/// (engine `layer.swiftPaint`). Each press uses a new seed, so repeating gives a new variation.
+fn swift_paint_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Swift Paint").id_salt("swift-paint").default_open(false).show(ui, |ui| {
+        const PRESETS: [(&str, &str); 4] = [("impressionist", "Impressionist"), ("oil", "Oil"), ("pointillist", "Pointillist"), ("wash", "Soft wash")];
+        let key = egui::Id::new("swift-paint-state");
+        // (preset, customise, brush size %, passes, detail %, opacity %, seed)
+        let (mut preset, mut custom, mut size, mut passes, mut detail, mut opacity, mut seed): (usize, bool, f32, f32, f32, f32, u32) =
+            ui.data(|d| d.get_temp(key)).unwrap_or((0, false, 1.2, 3.0, 50.0, 100.0, 1));
+        egui::ComboBox::from_id_salt("swift-paint-preset")
+            .width(ui.available_width() - 8.0)
+            .selected_text(PRESETS.get(preset).map_or("", |p| p.1))
+            .show_ui(ui, |ui| {
+                for (i, (_, label)) in PRESETS.iter().enumerate() {
+                    ui.selectable_value(&mut preset, i, *label);
+                }
+            });
+        ui.checkbox(&mut custom, "Customise").on_hover_text("Off: the preset's own brush sizes, detail and opacity.");
+        if custom {
+            crate::widgets::slider_row(ui, "Brush size", &mut size, 0.2..=4.0, "%", None);
+            crate::widgets::slider_row(ui, "Passes", &mut passes, 1.0..=5.0, "", None);
+            crate::widgets::slider_row(ui, "Detail", &mut detail, 0.0..=100.0, "%", None);
+            crate::widgets::slider_row(ui, "Opacity", &mut opacity, 5.0..=100.0, "%", None);
+        }
+        let paint = ui.button("Paint").on_hover_text("Adds a Swift Paint group: one layer per brush size, so you can mask or fade any pass").clicked();
+        if paint {
+            let mut params = json!({"preset": PRESETS.get(preset).map_or("impressionist", |p| p.0), "seed": seed});
+            if custom {
+                params["brushSize"] = json!(size);
+                params["passes"] = json!(passes.round());
+                params["detail"] = json!(detail);
+                params["opacity"] = json!(opacity);
+            }
+            let _ = app.run("layer.swiftPaint", params);
+            seed = seed.wrapping_add(1);
+        }
+        ui.data_mut(|d| d.insert_temp(key, (preset, custom, size, passes, detail, opacity, seed)));
+    });
+}
+
 #[cfg(test)]
 mod colour_match_tests {
     use super::*;
@@ -6378,6 +6419,15 @@ mod colour_match_tests {
         let refs = match_references(&a);
         assert!(refs.iter().any(|(l, r)| l.starts_with("Document:") && *r == MatchRef::Document(1)), "{refs:?}");
         assert!(refs.iter().all(|(_, r)| *r != MatchRef::Document(0)), "never the active document itself");
+    }
+
+    #[test]
+    fn swift_paint_through_the_panels_params_adds_a_group() {
+        let mut a = app();
+        a.run("file.new", json!({"width": 40, "height": 40, "background": "#4080c0"})).unwrap();
+        let n = a.session.active().unwrap().doc.layers.len();
+        a.run("layer.swiftPaint", json!({"preset": "wash", "seed": 1, "brushSize": 2.0, "passes": 2, "detail": 50.0, "opacity": 80.0})).unwrap();
+        assert_eq!(a.session.active().unwrap().doc.layers.len(), n + 1);
     }
 
     #[test]
