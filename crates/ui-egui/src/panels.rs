@@ -6353,6 +6353,13 @@ fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.checkbox(&mut guide_ref, "Reference: selection only").on_hover_text("Sample only the selected area of the reference, to pick which colours it lends.");
         ui.checkbox(&mut guide_pic, "Picture: selection only").on_hover_text("Measure only the selected area of this picture, to pick which colours get corrected.");
         ui.data_mut(|d| d.insert_temp(key, (pick, strength, contrast, mean, guide_ref, guide_pic)));
+        let is_doc = matches!(refs.get(pick), Some((_, MatchRef::Document(_))));
+        if ui.add_enabled(is_doc, egui::Button::new("Match all other documents")).on_hover_text("Adds a Swift Match layer to every other open document, using the chosen document as the reference").clicked()
+            && let Some((_, MatchRef::Document(i))) = refs.get(pick)
+        {
+            let params = json!({"source": i, "strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }, "useSelectionInSource": guide_ref, "useSelectionInTarget": guide_pic});
+            let _ = app.run("layer.batchColorMatch", params);
+        }
         ui.horizontal(|ui| {
             if ui.button("Save LUT…").on_hover_text("Export › Color Lookup Tables: bakes the visible lookup layers, including Swift Match, to .cube").clicked() {
                 let _ = crate::menus::invoke(app, ui.ctx(), "file.export.colorLookupTables", json!({}));

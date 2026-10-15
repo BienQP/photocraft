@@ -14,6 +14,9 @@ use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
 
 const CMD: &str = "layer.newColorMatchLayer";
+const BATCH: &str = "layer.batchColorMatch";
+/// Most documents one batch call matches.
+const MAX_BATCH: usize = 64;
 
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".into())
@@ -99,6 +102,61 @@ fn new_color_match(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(out)
 }
 
+
+/// Matches several open documents to one reference: each gets its own Color Lookup layer (so each
+/// can be adjusted or undone on its own). `source` is the reference document; `targets` the
+/// documents to correct (default: every other open document). A target that fails (say, it has no
+/// opaque pixels) is reported and the rest still run. The active document is restored afterwards.
+fn batch_color_match(s: &mut Session, p: &Value) -> Result<Value> {
+    let count = s.documents().len();
+    let source = p.get("source").and_then(Value::as_u64).map(|i| i as usize).filter(|i| *i < count).ok_or_else(|| EngineError::BadParams { cmd: BATCH.into(), msg: "`source` must be an open document index".into() })?;
+    let targets: Vec<usize> = match p.get("targets") {
+        None | Some(Value::Null) => (0..count).filter(|i| *i != source).collect(),
+        Some(v) => {
+            let list = v.as_array().ok_or_else(|| EngineError::BadParams { cmd: BATCH.into(), msg: "`targets` must be a list of document indices".into() })?;
+            let mut out = Vec::new();
+            for t in list {
+                let i = t.as_u64().map(|i| i as usize).filter(|i| *i < count && *i != source).ok_or_else(|| EngineError::BadParams { cmd: BATCH.into(), msg: "`targets` must be open document indices other than `source`".into() })?;
+                if !out.contains(&i) {
+                    out.push(i);
+                }
+            }
+            out
+        }
+    };
+    if targets.is_empty() {
+        return Err(EngineError::BadParams { cmd: BATCH.into(), msg: "no documents to match: open another document besides the reference".into() });
+    }
+    if targets.len() > MAX_BATCH {
+        return Err(EngineError::BadParams { cmd: BATCH.into(), msg: format!("at most {MAX_BATCH} documents per batch") });
+    }
+    let home = s.active_index();
+    let mut each = p.clone();
+    each["source"] = json!(source);
+    // The reference layer id is the reference document's; the targets are matched as a whole.
+    if let Some(o) = each.as_object_mut() {
+        o.remove("targets");
+        o.remove("targetLayer");
+        o.remove("exportPath");
+    }
+    let mut results = Vec::new();
+    let mut matched = 0usize;
+    for &t in &targets {
+        s.execute("document.activate", json!({ "document": t }))?;
+        match new_color_match(s, &each) {
+            Ok(v) => {
+                matched += 1;
+                results.push(json!({ "document": t, "layer": v["layer"] }));
+            }
+            Err(e) => results.push(json!({ "document": t, "error": e.to_string() })),
+        }
+    }
+    if let Some(h) = home {
+        s.execute("document.activate", json!({ "document": h }))?;
+    }
+    Ok(json!({ "matched": matched, "results": results }))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![CommandSpec {
         id: CMD,
@@ -109,6 +167,16 @@ pub fn specs() -> Vec<CommandSpec> {
         enabled: has_doc,
         run: new_color_match,
         journal: true,
+    },
+    CommandSpec {
+        id: BATCH,
+        label: "Color Match All Documents",
+        menu: &["Layer", "New Adjustment Layer"],
+        shortcut: None,
+        params: r##"{"source":document index (the reference; required),"sourceLayer":layer id in it,"targets":[document indices] (default: every other open document),"method","matchContrast","strength","size","useSelectionInSource","useSelectionInTarget": as layer.newColorMatchLayer} → {matched, results:[{document, layer | error}]}. Each target gets its own Color Lookup layer; the active document is restored."##,
+        enabled: has_doc,
+        run: batch_color_match,
+        journal: false,
     }]
 }
 
@@ -180,6 +248,38 @@ mod tests {
         let id = s.active().unwrap().active_layer.unwrap().0;
         s.execute("document.activate", json!({"document": 0})).unwrap();
         assert!(s.execute(CMD, json!({"sourceLayer": id})).is_err(), "a layer of another document is not in this one");
+    }
+
+    #[test]
+    fn batch_matches_every_other_document_and_restores_the_active_one() {
+        let mut s = Session::new();
+        for rgb in [[1.0, 1.0, 1.0], [0.9, 0.9, 1.0], [1.0, 0.5, 0.2]] {
+            s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
+            fill(&mut s, rgb);
+        }
+        // Documents 0 and 1 are bluish-grey ramps; document 2 (active) is the orange reference.
+        let layers = |s: &Session, i: usize| s.documents()[i].doc.layers.len();
+        let (n0, n1, n2) = (layers(&s, 0), layers(&s, 1), layers(&s, 2));
+        let out = s.execute(BATCH, json!({"source": 2})).unwrap();
+        assert_eq!(out["matched"], 2);
+        assert_eq!((layers(&s, 0), layers(&s, 1), layers(&s, 2)), (n0 + 1, n1 + 1, n2), "the reference is left alone");
+        assert_eq!(s.active_index(), Some(2), "the active document is restored");
+        let px = |s: &Session, i: usize| photocraft_compose::flatten(&s.documents()[i].doc).px[8 * 16 + 8];
+        assert!(px(&s, 0)[0] > 0.45 || px(&s, 1)[0] > 0.45, "they moved toward orange");
+        // Explicit targets, and a partial failure doesn't stop the rest.
+        let out = s.execute(BATCH, json!({"source": 2, "targets": [1]})).unwrap();
+        assert_eq!(out["matched"], 1);
+    }
+
+    #[test]
+    fn batch_bad_params_are_errors() {
+        let mut s = two_docs(8);
+        for p in [json!({}), json!({"source": 9}), json!({"source": 1, "targets": [1]}), json!({"source": 1, "targets": "x"}), json!({"source": 1, "targets": [9]}), json!({"source": 1, "strength": 500})] {
+            let r = s.execute(BATCH, p.clone());
+            assert!(r.is_err() || r.unwrap()["matched"] == 0, "{p}");
+        }
+        assert!(Session::new().execute(BATCH, json!({"source": 0})).is_err());
+        assert_eq!(s.active_index(), Some(0), "still where it was");
     }
 
     #[test]
