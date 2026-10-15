@@ -209,6 +209,101 @@ pub fn build_lut(fit: &Fit, size: usize, strength: f32) -> Vec<f32> {
     out
 }
 
+/// One guided target: the picture colour `from` and, optionally, the colour `to` it should become.
+/// Colours near `from` (within `radius` in Oklab, tapering over `softness`) follow the pin; with no
+/// `to` the zone just keeps the overall match (useful with [`Guides::only_guided`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Guide {
+    pub from: [f32; 3],
+    pub to: Option<[f32; 3]>,
+    /// Oklab distance where the zone ends (clamped to 0.01..=0.6).
+    pub radius: f32,
+    /// 0 = hard-edged zone, 1 = falls off from the centre.
+    pub softness: f32,
+    /// 0..=1: how far the pin pulls (0 = the plain match).
+    pub amount: f32,
+}
+
+/// A set of guides and how they combine with the overall match.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Guides {
+    pub list: Vec<Guide>,
+    /// Only colours inside a guide zone are matched; everything else stays as it was.
+    pub only_guided: bool,
+}
+
+/// Most guides one table takes.
+pub const MAX_GUIDES: usize = 16;
+
+fn unit(v: f32, default: f32) -> f32 {
+    if v.is_finite() { v.clamp(0.0, 1.0) } else { default }
+}
+
+fn clean(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| unit(v, 0.0))
+}
+
+fn zone(lab: [f32; 3], g: &Guide) -> f32 {
+    let c = srgb_to_oklab(clean(g.from));
+    let d = (((lab[0] - c[0]) * 0.5).powi(2) + (lab[1] - c[1]).powi(2) + (lab[2] - c[2]).powi(2)).sqrt();
+    let r = if g.radius.is_finite() { g.radius.clamp(0.01, 0.6) } else { 0.12 };
+    let inner = r * (1.0 - unit(g.softness, 0.5));
+    if d <= inner {
+        1.0
+    } else if d >= r {
+        0.0
+    } else {
+        let t = (d - inner) / (r - inner).max(1e-6);
+        0.5 + 0.5 * (std::f32::consts::PI * t).cos()
+    }
+}
+
+/// Like [`build_lut`], with guided targets: each guide's `from` colour lands on its `to`, the
+/// neighbourhood follows smoothly, and (with `only_guided`) colours outside every zone stay put.
+pub fn build_guided_lut(fit: &Fit, guides: &Guides, size: usize, strength: f32) -> Vec<f32> {
+    let n = size.clamp(MIN_LUT, MAX_LUT);
+    let k = unit(strength, 0.0);
+    let list: Vec<&Guide> = guides.list.iter().take(MAX_GUIDES).collect();
+    // Per guide: the pull = wanted colour - what the plain match gives its centre (in Oklab).
+    let pulls: Vec<[f32; 3]> = list
+        .iter()
+        .map(|g| match g.to {
+            Some(to) => {
+                let want = srgb_to_oklab(clean(to));
+                let have = srgb_to_oklab(fit.apply(clean(g.from)));
+                let a = unit(g.amount, 1.0);
+                std::array::from_fn(|i| (want[i] - have[i]) * a)
+            }
+            None => [0.0; 3],
+        })
+        .collect();
+    let step = 1.0 / (n - 1) as f32;
+    let mut out = Vec::with_capacity(n * n * n * 3);
+    for bi in 0..n {
+        for gi in 0..n {
+            for ri in 0..n {
+                let c = [ri as f32 * step, gi as f32 * step, bi as f32 * step];
+                let lab = srgb_to_oklab(c);
+                let ws: Vec<f32> = list.iter().map(|g| zone(lab, g)).collect();
+                let total: f32 = ws.iter().sum();
+                let norm = if total > 1.0 { 1.0 / total } else { 1.0 };
+                let reach = ws.iter().cloned().fold(0.0f32, f32::max);
+                let lead = if guides.only_guided { reach } else { 1.0 };
+                let m = srgb_to_oklab(fit.apply(c));
+                let mut t: [f32; 3] = std::array::from_fn(|i| lab[i] + (m[i] - lab[i]) * lead);
+                for (w, pull) in ws.iter().zip(&pulls) {
+                    for i in 0..3 {
+                        t[i] += pull[i] * w * norm;
+                    }
+                }
+                let rgb = oklab_to_srgb(fit_in_gamut([t[0].clamp(0.0, 1.0), t[1], t[2]]));
+                out.extend((0..3).map(|i| (c[i] + (rgb[i] - c[i]) * k).clamp(0.0, 1.0)));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +443,55 @@ mod tests {
         assert_eq!(build_lut(&f, 0, f32::NAN).len(), MIN_LUT.pow(3) * 3);
         assert_eq!(build_lut(&f, usize::MAX, 9.0).len(), MAX_LUT.pow(3) * 3);
         let _ = f.apply([f32::NAN, f32::INFINITY, -5.0]);
+    }
+
+    fn lut_at(lut: &[f32], n: usize, c: [f32; 3]) -> [f32; 3] {
+        let q = |v: f32| (v * (n - 1) as f32).round() as usize;
+        let i = (q(c[2]) * n * n + q(c[1]) * n + q(c[0])) * 3;
+        [lut[i], lut[i + 1], lut[i + 2]]
+    }
+
+    #[test]
+    fn a_pinned_colour_lands_on_its_target_and_distant_colours_stay_with_the_match() {
+        let st = ok(&image([0.0, 0.0, 0.0], 0.1));
+        let f = fit(&st, &st, &Options::default()); // identity match
+        let red = [0.8, 0.2, 0.2];
+        let blue = [0.2, 0.3, 0.8];
+        let g = Guides { list: vec![Guide { from: red, to: Some([0.9, 0.5, 0.1]), radius: 0.15, softness: 0.5, amount: 1.0 }], only_guided: false };
+        let lut = build_guided_lut(&f, &g, 17, 1.0);
+        let moved = lut_at(&lut, 17, red);
+        assert!((moved[1] - 0.5).abs() < 0.08 && moved[0] > 0.8, "{moved:?}");
+        let far = lut_at(&lut, 17, blue);
+        for i in 0..3 {
+            assert!((far[i] - blue[i]).abs() < 0.05, "{far:?}");
+        }
+    }
+
+    #[test]
+    fn only_guided_leaves_other_colours_alone_and_zero_strength_is_identity() {
+        let target = ok(&image([0.0, 0.0, 0.0], 0.1));
+        let source = ok(&image([0.0, 0.08, 0.05], 0.1));
+        let f = fit(&target, &source, &Options::default());
+        let grey = [0.5, 0.5, 0.5];
+        let g = Guides { list: vec![Guide { from: [0.9, 0.1, 0.1], to: None, radius: 0.05, softness: 0.0, amount: 1.0 }], only_guided: true };
+        let lut = build_guided_lut(&f, &g, 9, 1.0);
+        let o = lut_at(&lut, 9, grey);
+        for i in 0..3 {
+            assert!((o[i] - grey[i]).abs() < 0.07, "{o:?}");
+        }
+        let zero = build_guided_lut(&f, &g, 9, 0.0);
+        let id = build_lut(&f, 9, 0.0);
+        for (a, b) in zero.iter().zip(&id) {
+            assert!((a - b).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn hostile_guides_do_not_panic() {
+        let st = ok(&image([0.0, 0.0, 0.0], 0.1));
+        let f = fit(&st, &st, &Options::default());
+        let bad = Guide { from: [f32::NAN, 2.0, -1.0], to: Some([f32::INFINITY, 0.0, 0.0]), radius: f32::NAN, softness: f32::NAN, amount: f32::NAN };
+        let lut = build_guided_lut(&f, &Guides { list: vec![bad; 40], only_guided: true }, 9, f32::NAN);
+        assert!(lut.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)));
     }
 }

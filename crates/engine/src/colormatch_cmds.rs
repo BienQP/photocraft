@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use photocraft_algo::colormatch::{MAX_LUT, Method, Options, build_lut, fit, stats};
+use photocraft_algo::colormatch::{Guide, Guides, MAX_GUIDES, MAX_LUT, Method, Options, build_guided_lut, build_lut, fit, stats};
 use photocraft_doc::Adjustment;
 use serde_json::{Value, json};
 
@@ -50,6 +50,59 @@ fn number(p: &Value, key: &str, lo: f64, hi: f64, default: f64) -> Result<f64> {
     }
 }
 
+/// A colour param: `[r,g,b]` 0..=255 or `"#rrggbb"`.
+fn colour(v: &Value, what: &str) -> Result<[f32; 3]> {
+    if let Some(t) = v.as_str() {
+        let h = t.strip_prefix('#').unwrap_or(t);
+        if h.len() == 6 && h.is_ascii() {
+            let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map(|b| b as f32 / 255.0);
+            if let (Ok(r), Ok(g), Ok(b)) = (byte(0), byte(2), byte(4)) {
+                return Ok([r, g, b]);
+            }
+        }
+        return Err(bad(format!("{what} must be #rrggbb")));
+    }
+    let a = v.as_array().filter(|a| a.len() == 3).ok_or_else(|| bad(format!("{what} must be [r,g,b] (0-255) or #rrggbb")))?;
+    let mut out = [0.0f32; 3];
+    for (o, x) in out.iter_mut().zip(a) {
+        let n = x.as_f64().filter(|n| n.is_finite() && (0.0..=255.0).contains(n)).ok_or_else(|| bad(format!("{what} channels must be 0-255")))?;
+        *o = n as f32 / 255.0;
+    }
+    Ok(out)
+}
+
+/// `guides`: [{from, to?, radius 0.01..0.6=0.12, softness 0..100=50, amount 0..100=100}], plus
+/// `onlyGuided`. None when no guides were given.
+fn guides(p: &Value) -> Result<Option<Guides>> {
+    let only_guided = flag(p, "onlyGuided")?;
+    let list = match p.get("guides") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => v.as_array().ok_or_else(|| bad("`guides` must be a list"))?,
+    };
+    if list.is_empty() {
+        return Ok(None);
+    }
+    if list.len() > MAX_GUIDES {
+        return Err(bad(format!("at most {MAX_GUIDES} guides")));
+    }
+    let mut out = Vec::new();
+    for g in list {
+        let from = colour(g.get("from").ok_or_else(|| bad("each guide needs `from` (a picture colour)"))?, "`from`")?;
+        let to = match g.get("to") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(colour(v, "`to`")?),
+        };
+        out.push(Guide {
+            from,
+            to,
+            radius: number(g, "radius", 0.01, 0.6, 0.12)? as f32,
+            softness: number(g, "softness", 0.0, 100.0, 50.0)? as f32 / 100.0,
+            amount: number(g, "amount", 0.0, 100.0, 100.0)? as f32 / 100.0,
+        });
+    }
+    Ok(Some(Guides { list: out, only_guided }))
+}
+
 fn new_color_match(s: &mut Session, p: &Value) -> Result<Value> {
     let method = match p.get("method") {
         None | Some(Value::Null) => Method::Covariance,
@@ -58,6 +111,7 @@ fn new_color_match(s: &mut Session, p: &Value) -> Result<Value> {
     let strength = number(p, "strength", 0.0, 100.0, 100.0)? as f32 / 100.0;
     let size = number(p, "size", 9.0, MAX_LUT as f64, 33.0)?.round() as usize;
     let opts = Options { method, match_contrast: flag(p, "matchContrast")?, strength };
+    let guided = guides(p)?;
 
     let active = s.active_index().ok_or(EngineError::NoDocument)?;
     let source_doc = match p.get("source") {
@@ -80,7 +134,11 @@ fn new_color_match(s: &mut Session, p: &Value) -> Result<Value> {
     let target = stats(&tpx, tmask.as_deref()).ok_or_else(|| bad("the picture has no opaque pixels"))?;
     drop((spx, tpx));
 
-    let lut = build_lut(&fit(&target, &source, &opts), size, opts.strength);
+    let fitted = fit(&target, &source, &opts);
+    let lut = match &guided {
+        Some(g) => build_guided_lut(&fitted, g, size, opts.strength),
+        None => build_lut(&fitted, size, opts.strength),
+    };
     let n = (lut.len() / 3).max(1);
     let edge = (n as f64).cbrt().round() as usize;
 
@@ -163,7 +221,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Color Match (Lookup)",
         menu: &["Layer", "New Adjustment Layer"],
         shortcut: None,
-        params: r##"{"source":document index (default: the active document),"sourceLayer":layer id (a layer, hidden or not, as the reference),"targetLayer":layer id (default: the whole picture),"useSelectionInSource":bool=false,"useSelectionInTarget":bool=false,"method":"covariance|mean"="covariance","matchContrast":bool=false (take the reference's tonal range; off keeps the picture's own lighting),"strength":0..100=100,"size":9..65=33 (LUT edge),"exportPath":text (native: also write the table as a .cube)} → {layer, lutSize}. Needs a reference: another document or a layer."##,
+        params: r##"{"source":document index (default: the active document),"sourceLayer":layer id (a layer, hidden or not, as the reference),"targetLayer":layer id (default: the whole picture),"useSelectionInSource":bool=false,"useSelectionInTarget":bool=false,"method":"covariance|mean"="covariance","matchContrast":bool=false (take the reference's tonal range; off keeps the picture's own lighting),"strength":0..100=100,"size":9..65=33 (LUT edge),"guides":[{from:[r,g,b]|"#rrggbb" (a colour in the picture),to:colour (what it should become; omit to keep the plain match),radius:0.01..0.6=0.12 (Oklab),softness:0..100=50,amount:0..100=100}] (max 16),"onlyGuided":bool=false (match only inside the guide zones),"exportPath":text (native: also write the table as a .cube)} → {layer, lutSize}. Needs a reference: another document or a layer."##,
         enabled: has_doc,
         run: new_color_match,
         journal: true,
@@ -173,7 +231,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Color Match All Documents",
         menu: &["Layer", "New Adjustment Layer"],
         shortcut: None,
-        params: r##"{"source":document index (the reference; required),"sourceLayer":layer id in it,"targets":[document indices] (default: every other open document),"method","matchContrast","strength","size","useSelectionInSource","useSelectionInTarget": as layer.newColorMatchLayer} → {matched, results:[{document, layer | error}]}. Each target gets its own Color Lookup layer; the active document is restored."##,
+        params: r##"{"source":document index (the reference; required),"sourceLayer":layer id in it,"targets":[document indices] (default: every other open document),"method","matchContrast","strength","size","useSelectionInSource","useSelectionInTarget","guides","onlyGuided": as layer.newColorMatchLayer} → {matched, results:[{document, layer | error}]}. Each target gets its own Color Lookup layer; the active document is restored."##,
         enabled: has_doc,
         run: batch_color_match,
         journal: false,
@@ -298,12 +356,47 @@ mod tests {
             json!({"source": 1, "matchContrast": 3}),
             json!({"sourceLayer": 99999}),
             json!({"source": 1, "targetLayer": 99999}),
+            json!({"source": 1, "guides": 3}),
+            json!({"source": 1, "guides": [{}]}),
+            json!({"source": 1, "guides": [{"from": [1, 2]}]}),
+            json!({"source": 1, "guides": [{"from": [300, 0, 0]}]}),
+            json!({"source": 1, "guides": [{"from": "#zzzzzz"}]}),
+            json!({"source": 1, "guides": [{"from": "#é1234"}]}),
+            json!({"source": 1, "guides": [{"from": "#ff0000", "to": [1, "a", 3]}]}),
+            json!({"source": 1, "guides": [{"from": "#ff0000", "radius": 5}]}),
+            json!({"source": 1, "guides": [{"from": "#ff0000", "softness": -1}]}),
+            json!({"source": 1, "guides": vec![json!({"from": "#ff0000"}); 17]}),
+            json!({"source": 1, "guides": [{"from": "#ff0000"}], "onlyGuided": 2}),
         ] {
             assert!(s.execute(CMD, p.clone()).is_err(), "{p}");
         }
         let _ = s.execute(CMD, json!(7));
         let mut empty = Session::new();
         assert!(empty.execute(CMD, json!({"source": 0})).is_err());
+    }
+
+    #[test]
+    fn a_guide_pins_the_picture_colour_to_its_target() {
+        // The grey picture, matched to the orange reference, then pinned: mid-grey → pure blue-ish.
+        let mut s = two_docs(8);
+        let plain = {
+            s.execute(CMD, json!({"source": 1})).unwrap();
+            let v = mid(&s);
+            s.execute("edit.undo", json!({})).unwrap();
+            v
+        };
+        let before = mid(&s);
+        let from = [(before[0] * 255.0).round(), (before[1] * 255.0).round(), (before[2] * 255.0).round()];
+        s.execute(CMD, json!({"source": 1, "guides": [{"from": from, "to": "#2040e0", "radius": 0.2}]})).unwrap();
+        let pinned = mid(&s);
+        assert!(pinned[2] > pinned[0] + 0.1, "pulled toward blue: {pinned:?} (plain {plain:?})");
+        // Only-guided with a guide far from the picture leaves it as it was.
+        s.execute("edit.undo", json!({})).unwrap();
+        s.execute(CMD, json!({"source": 1, "onlyGuided": true, "guides": [{"from": "#ff0000", "radius": 0.05, "softness": 0}]})).unwrap();
+        let kept = mid(&s);
+        for i in 0..3 {
+            assert!((kept[i] - before[i]).abs() < 0.03, "{kept:?} vs {before:?}");
+        }
     }
 
     #[test]

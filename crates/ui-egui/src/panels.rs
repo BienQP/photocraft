@@ -6353,6 +6353,69 @@ fn match_references(app: &PhotocraftApp) -> Vec<(String, MatchRef)> {
     out
 }
 
+/// One guided target in the Swift Match panel: a picture colour, optionally the colour it should become.
+#[derive(Clone, Debug, PartialEq)]
+struct MatchGuide {
+    from: [u8; 3],
+    to: [u8; 3],
+    use_to: bool,
+    radius: f32,
+}
+
+fn merge_params(into: &mut serde_json::Value, extra: &serde_json::Value) {
+    if let (Some(a), Some(b)) = (into.as_object_mut(), extra.as_object()) {
+        for (k, v) in b {
+            a.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// The "Guided colours" block of Swift Match: colour pins that steer the match. Returns the
+/// `guides` / `onlyGuided` params (empty object when there are none).
+fn match_guides_ui(ui: &mut egui::Ui) -> serde_json::Value {
+    let key = egui::Id::new("swift-colour-match-guides");
+    let (mut list, mut only): (Vec<MatchGuide>, bool) = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+    egui::CollapsingHeader::new("Guided colours").id_salt("swift-colour-match-guides-hdr").default_open(false).show(ui, |ui| {
+        ui.label(RichText::new("Pin a colour in the picture to a colour you want it to become. Nearby colours follow.").size(11.0));
+        let mut remove = None;
+        for (i, g) in list.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgb(&mut g.from).on_hover_text("A colour in the picture");
+                ui.checkbox(&mut g.use_to, "→").on_hover_text("Turn on to choose the colour it becomes; off keeps the plain match for this colour");
+                ui.add_enabled_ui(g.use_to, |ui| {
+                    ui.color_edit_button_srgb(&mut g.to).on_hover_text("The colour it should become");
+                });
+                if ui.small_button("✕").on_hover_text("Remove this guide").clicked() {
+                    remove = Some(i);
+                }
+            });
+            crate::widgets::slider_row(ui, "Range", &mut g.radius, 1.0..=60.0, "", None);
+        }
+        if let Some(i) = remove {
+            list.remove(i);
+        }
+        if list.len() < photocraft_algo::colormatch::MAX_GUIDES && ui.button("Add guide").clicked() {
+            list.push(MatchGuide { from: [200, 60, 60], to: [230, 130, 40], use_to: true, radius: 12.0 });
+        }
+        ui.checkbox(&mut only, "Match only the guided colours").on_hover_text("Everything outside the guide ranges stays as it was.");
+    });
+    ui.data_mut(|d| d.insert_temp(key, (list.clone(), only)));
+    if list.is_empty() {
+        return json!({});
+    }
+    let guides: Vec<_> = list
+        .iter()
+        .map(|g| {
+            let mut v = json!({"from": g.from, "radius": g.radius / 100.0});
+            if g.use_to {
+                v["to"] = json!(g.to);
+            }
+            v
+        })
+        .collect();
+    json!({"guides": guides, "onlyGuided": only})
+}
+
 /// Swift Match: move this picture's colours toward a reference, keeping its own lighting, as a
 /// non-destructive Color Lookup layer (engine `layer.newColorMatchLayer`).
 fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
@@ -6381,11 +6444,13 @@ fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.checkbox(&mut guide_ref, "Reference: selection only").on_hover_text("Sample only the selected area of the reference, to pick which colours it lends.");
         ui.checkbox(&mut guide_pic, "Picture: selection only").on_hover_text("Measure only the selected area of this picture, to pick which colours get corrected.");
         ui.data_mut(|d| d.insert_temp(key, (pick, strength, contrast, mean, guide_ref, guide_pic)));
+        let guide_params = match_guides_ui(ui);
         let is_doc = matches!(refs.get(pick), Some((_, MatchRef::Document(_))));
         if ui.add_enabled(is_doc, egui::Button::new("Match all other documents")).on_hover_text("Adds a Swift Match layer to every other open document, using the chosen document as the reference").clicked()
             && let Some((_, MatchRef::Document(i))) = refs.get(pick)
         {
-            let params = json!({"source": i, "strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }, "useSelectionInSource": guide_ref, "useSelectionInTarget": guide_pic});
+            let mut params = json!({"source": i, "strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }, "useSelectionInSource": guide_ref, "useSelectionInTarget": guide_pic});
+            merge_params(&mut params, &guide_params);
             let _ = app.run("layer.batchColorMatch", params);
         }
         ui.horizontal(|ui| {
@@ -6397,6 +6462,7 @@ fn color_match_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             && let Some((_, r)) = refs.get(pick)
         {
             let mut params = json!({"strength": strength, "matchContrast": contrast, "method": if mean { "mean" } else { "covariance" }, "useSelectionInSource": guide_ref, "useSelectionInTarget": guide_pic});
+            merge_params(&mut params, &guide_params);
             match r {
                 MatchRef::Document(i) => params["source"] = json!(i),
                 MatchRef::Layer(id) => params["sourceLayer"] = json!(id),
