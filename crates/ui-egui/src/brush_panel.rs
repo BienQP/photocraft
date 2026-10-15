@@ -109,6 +109,8 @@ pub struct BrushesPanelState {
     pub quick: Vec<String>,
     /// Swift Brush: group colours and preset tags ([`crate::brush_swift`]).
     pub swift: crate::brush_swift::SwiftBrush,
+    /// What the stroke previews draw ([`crate::brush_preview::PreviewStyle`]).
+    pub preview_style: crate::brush_preview::PreviewStyle,
 }
 
 impl Default for BrushesPanelState {
@@ -124,6 +126,7 @@ impl Default for BrushesPanelState {
             scale: 1.0,
             quick: crate::brush_quick::default_quick(),
             swift: Default::default(),
+            preview_style: Default::default(),
         }
     }
 }
@@ -389,6 +392,7 @@ fn settings_tab(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(STRIP.0 as f32, STRIP.1 as f32), Sense::hover());
         ui.painter().rect_filled(r, t.radius_sm, t.field);
+        brush_preview::set_style(ui.ctx(), app.ui.brushes_panel.preview_style);
         let tex = brush_preview::stroke_texture(ui.ctx(), "settings-strip", &b, STRIP.0, STRIP.1, t.text);
         ui.painter().image(tex.id(), r, full_uv(), Color32::WHITE);
         ui.vertical(|ui| {

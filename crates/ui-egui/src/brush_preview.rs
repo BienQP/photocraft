@@ -7,6 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use egui::Color32;
+use serde::{Deserialize, Serialize};
 use photocraft_engine::BrushSettings;
 use photocraft_engine::paint::{self, Pattern, StrokePoint, TipShape};
 
@@ -75,6 +76,73 @@ fn tip_shape_sig(h: &mut DefaultHasher, t: &TipShape) {
     }
 }
 
+/// What the stroke previews draw (Swift Brush): the classic S-curve, a straight line, separate
+/// dabs, or a scribble. It only changes the preview; the brush paints the same.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PreviewStyle {
+    #[default]
+    Wave,
+    Line,
+    Dabs,
+    Scribble,
+}
+
+impl PreviewStyle {
+    pub const ALL: [PreviewStyle; 4] = [PreviewStyle::Wave, PreviewStyle::Line, PreviewStyle::Dabs, PreviewStyle::Scribble];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewStyle::Wave => "Wave",
+            PreviewStyle::Line => "Line",
+            PreviewStyle::Dabs => "Dabs",
+            PreviewStyle::Scribble => "Scribble",
+        }
+    }
+}
+
+fn style_id() -> egui::Id {
+    egui::Id::new("brush-preview-style")
+}
+
+/// Sets the style every stroke preview draws until changed (the panels call this each frame from
+/// the Brushes panel's saved state).
+pub fn set_style(ctx: &egui::Context, style: PreviewStyle) {
+    ctx.data_mut(|d| d.insert_temp(style_id(), style));
+}
+
+pub fn style(ctx: &egui::Context) -> PreviewStyle {
+    ctx.data(|d| d.get_temp(style_id())).unwrap_or_default()
+}
+
+/// The strokes of one preview, in a `w × h` strip.
+fn preview_strokes(style: PreviewStyle, w: u32, h: u32) -> Vec<Vec<StrokePoint>> {
+    use std::f64::consts::{PI, TAU};
+    let (wf, hf) = (f64::from(w), f64::from(h));
+    let taper = |s: f64| (s * PI).sin().max(0.05) as f32;
+    let path = |n: usize, f: &dyn Fn(f64) -> (f64, f64, f32)| -> Vec<StrokePoint> {
+        (0..=n)
+            .map(|i| {
+                let s = i as f64 / n as f64;
+                let (x, y, pr) = f(s);
+                StrokePoint::new(x, y, pr)
+            })
+            .collect()
+    };
+    match style {
+        PreviewStyle::Wave => vec![path(64, &|s| (10.0 + s * (wf - 20.0), hf / 2.0 - (s * TAU).sin() * hf * 0.22, taper(s)))],
+        PreviewStyle::Line => vec![path(48, &|s| (10.0 + s * (wf - 20.0), hf / 2.0, taper(s)))],
+        PreviewStyle::Scribble => vec![path(120, &|s| (10.0 + s * (wf - 20.0), hf / 2.0 - (s * TAU * 3.0).sin() * hf * 0.28, 0.35 + 0.6 * taper(s)))],
+        PreviewStyle::Dabs => (0..6)
+            .map(|i| {
+                let s = f64::from(i) / 5.0;
+                // One dab each, growing in pressure across the strip.
+                vec![StrokePoint::new(wf * 0.1 + s * wf * 0.8, hf / 2.0, (0.25 + 0.75 * s) as f32)]
+            })
+            .collect(),
+    }
+}
+
 /// Cheap signature of everything that changes a brush's stroke preview.
 pub fn preview_sig(b: &BrushSettings) -> u64 {
     let mut h = DefaultHasher::new();
@@ -106,6 +174,11 @@ pub fn tip_sig(tip: &TipShape, hardness: f32, angle: f32, roundness: f32, flip: 
 /// A stroke rendered with the brush (scaled down to fit), as straight RGBA8: Photoshop's preview
 /// S-curve with pressure tapering in and out.
 pub fn preview_pixels(b: &BrushSettings, w: u32, h: u32, color: [f32; 4]) -> Vec<u8> {
+    preview_pixels_styled(b, w, h, color, PreviewStyle::Wave)
+}
+
+/// [`preview_pixels`] drawing `style`.
+pub fn preview_pixels_styled(b: &BrushSettings, w: u32, h: u32, color: [f32; 4], style: PreviewStyle) -> Vec<u8> {
     use photocraft_color::{ColorMode, PixelFormat, SampleType};
     let mut brush = b.clone();
     let k = ((h as f32 * 0.55) / brush.size.max(1.0)).min(1.0);
@@ -116,18 +189,11 @@ pub fn preview_pixels(b: &BrushSettings, w: u32, h: u32, color: [f32; 4]) -> Vec
     brush.seed = 7;
     // Build-up adds dabs over (simulated) time: the preview has none.
     brush.build_up = false;
-    let n = 64;
-    let points: Vec<StrokePoint> = (0..=n)
-        .map(|i| {
-            let s = i as f64 / n as f64;
-            let x = 10.0 + s * (w as f64 - 20.0);
-            let y = h as f64 / 2.0 - (s * std::f64::consts::TAU).sin() * h as f64 * 0.22;
-            StrokePoint::new(x, y, (s * std::f64::consts::PI).sin().max(0.05) as f32)
-        })
-        .collect();
     let fmt = PixelFormat::new(ColorMode::Rgb, SampleType::U8, true);
     let mut s = photocraft_raster::Surface::new(fmt);
-    paint::apply_stroke(&mut s, &paint::Stroke { brush, points }, None, false);
+    for points in preview_strokes(style, w, h) {
+        paint::apply_stroke(&mut s, &paint::Stroke { brush: brush.clone(), points }, None, false);
+    }
     let r = photocraft_geom::Rect::new(0, 0, w as i32, h as i32);
     let mut px = vec![[0.0f32; 4]; (w * h) as usize];
     s.read_rgba_into(r, &mut px);
@@ -240,12 +306,13 @@ pub fn render_count(ctx: &egui::Context) -> u64 {
 /// The stroke preview of `b` for `slot`, re-rendered only when the brush or size changes.
 pub fn stroke_texture(ctx: &egui::Context, slot: &str, b: &BrushSettings, w: u32, h: u32, color: Color32) -> egui::TextureHandle {
     let mut hs = DefaultHasher::new();
-    (preview_sig(b), w, h, color).hash(&mut hs);
+    let style = style(ctx);
+    (preview_sig(b), w, h, color, style).hash(&mut hs);
     let sig = hs.finish();
     with_cache(ctx, |cache| {
         cache.get(slot, sig, || {
             let c = color.to_normalized_gamma_f32();
-            upload(ctx, slot, w, h, &preview_pixels(b, w, h, [c[0], c[1], c[2], 1.0]))
+            upload(ctx, slot, w, h, &preview_pixels_styled(b, w, h, [c[0], c[1], c[2], 1.0], style))
         })
     })
 }
@@ -292,6 +359,34 @@ mod tests {
         assert_ne!(base, preview_sig(&BrushSettings { texture: paint::Texture { enabled: true, ..Default::default() }, ..Default::default() }));
         c.retain(|_| false);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn every_preview_style_draws_something_different_that_fits() {
+        let b = BrushSettings { size: 14.0, ..Default::default() };
+        let mut seen = Vec::new();
+        for style in PreviewStyle::ALL {
+            let px = preview_pixels_styled(&b, 160, 40, [0.0, 0.0, 0.0, 1.0], style);
+            assert_eq!(px.len(), 160 * 40 * 4, "{style:?}");
+            let covered = px.as_chunks::<4>().0.iter().filter(|p| p[3] > 128).count();
+            assert!(covered > 30 && covered < 160 * 40 * 2 / 3, "{style:?}: {covered}");
+            assert!(!seen.contains(&px), "{style:?} repeats another style");
+            seen.push(px);
+        }
+        assert_eq!(preview_pixels(&b, 160, 40, [0.0, 0.0, 0.0, 1.0]), seen[0], "the default is the wave");
+    }
+
+    #[test]
+    fn the_chosen_style_reaches_the_cached_texture() {
+        let ctx = egui::Context::default();
+        let b = BrushSettings::default();
+        let _ = stroke_texture(&ctx, "slot", &b, 64, 24, Color32::WHITE);
+        let n = render_count(&ctx);
+        let _ = stroke_texture(&ctx, "slot", &b, 64, 24, Color32::WHITE);
+        assert_eq!(render_count(&ctx), n, "same style: cached");
+        set_style(&ctx, PreviewStyle::Dabs);
+        let _ = stroke_texture(&ctx, "slot", &b, 64, 24, Color32::WHITE);
+        assert_eq!(render_count(&ctx), n + 1, "a new style re-renders");
     }
 
     #[test]

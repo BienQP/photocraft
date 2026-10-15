@@ -932,6 +932,7 @@ fn rename_bar(ui: &mut egui::Ui, st: &mut BrushesPanelState, acts: &mut Vec<Acti
 pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&str>, st: &mut BrushesPanelState, layout: ListLayout) -> Vec<Action> {
     let mut acts = Vec::new();
     rename_bar(ui, st, &mut acts);
+    brush_preview::set_style(ui.ctx(), st.preview_style);
     let filter = st.filter.trim().to_lowercase();
     let grid = st.view == BrushesView::Grid;
     let show = (st.show_name, st.show_stroke, st.show_tip);

@@ -111,6 +111,14 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Stroke preview").size(11.0).color(t.text_dim));
+            egui::ComboBox::from_id_salt("swift-brush-preview-style").width(90.0).selected_text(app.ui.brushes_panel.preview_style.label()).show_ui(ui, |ui| {
+                for style in crate::brush_preview::PreviewStyle::ALL {
+                    ui.selectable_value(&mut app.ui.brushes_panel.preview_style, style, style.label());
+                }
+            });
+        });
         let before = app.session.tools.brush.clone();
         let mut b = before.clone();
         let ids = app.ui.brushes_panel.quick.clone();
