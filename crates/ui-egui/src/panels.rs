@@ -3893,6 +3893,34 @@ fn luminosity_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         row(ui, "Darks", "darks", 1..=4, &mut run);
         row(ui, "Mids", "mids", 1..=3, &mut run);
         row(ui, "Zones", "zone", 0..=10, &mut run);
+        // Custom brightness range.
+        let rid = egui::Id::new("swift-luminosity-range");
+        let (mut low, mut high, mut soft): (f32, f32, f32) = ui.data(|d| d.get_temp(rid)).unwrap_or((30.0, 70.0, 10.0));
+        ui.label(RichText::new("Custom range").size(11.0));
+        crate::widgets::slider_row(ui, "From", &mut low, 0.0..=100.0, "%", None);
+        crate::widgets::slider_row(ui, "To", &mut high, 0.0..=100.0, "%", None);
+        crate::widgets::slider_row(ui, "Softness", &mut soft, 0.0..=50.0, "%", None);
+        ui.data_mut(|d| d.insert_temp(rid, (low, high, soft)));
+        if ui.button("Select range").on_hover_text("Brightness between From and To, fading out over Softness").clicked() {
+            run(ui, json!({"kind": "range", "low": low.min(high), "high": low.max(high), "softness": soft, "mode": mode_name}));
+        }
+        // Colour masks.
+        let cid = egui::Id::new("swift-luminosity-colour");
+        let (mut width, mut csoft): (f32, f32) = ui.data(|d| d.get_temp(cid)).unwrap_or((30.0, 30.0));
+        ui.label(RichText::new("Colours").size(11.0));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for (name, hue) in photocraft_algo::luminosity::COLOURS {
+                let c = photocraft_color::wheel::oklch_to_srgb([0.72, 0.14, hue.to_radians()]).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let label = RichText::new(name.trim_end_matches('s')).size(11.0).color(Color32::from_rgb(c[0], c[1], c[2]));
+                if ui.small_button(label).on_hover_text(format!("Select {name}: pixels near this hue")).clicked() {
+                    run(ui, json!({"kind": "color", "color": name, "width": width, "softness": csoft, "mode": mode_name}));
+                }
+            }
+        });
+        crate::widgets::slider_row(ui, "Width", &mut width, 0.0..=90.0, "°", None);
+        crate::widgets::slider_row(ui, "Softness", &mut csoft, 0.0..=90.0, "°", None);
+        ui.data_mut(|d| d.insert_temp(cid, (width, csoft)));
         ui.horizontal(|ui| {
             if ui.button("Preview").on_hover_text("Edit in Quick Mask Mode: see the selection as an overlay (Q)").clicked() {
                 let _ = crate::menus::invoke(app, ui.ctx(), "select.editInQuickMaskMode", json!({}));

@@ -1,10 +1,10 @@
-//! Select › Luminosity Mask: selections from brightness (Lights, Darks, Mids and the eleven
-//! zones), combined with the current selection by `mode`. The maths is
+//! Select › Luminosity Mask: selections from brightness (Lights, Darks, Mids, the eleven zones and
+//! custom ranges) or from colour (a hue and its width), combined with the current selection by `mode`. The maths is
 //! `photocraft_algo::luminosity`; this module reads the composite (or the active layer) in bands
 //! and applies the result like every other selection command, so the Swift Panel, scripts and MCP
 //! all select identically.
 
-use photocraft_algo::luminosity::{LumKind, LumSpec, MAX_LEVEL, MAX_ZONE, band_bytes};
+use photocraft_algo::luminosity::{COLOURS, LumKind, LumSpec, MAX_LEVEL, MAX_ZONE, MaskSpec, band_bytes_for};
 use photocraft_algo::segment::{Sampler, SurfaceSampler};
 use photocraft_algo::selection::{Region, SelectionMode, combine_region};
 use photocraft_geom::Rect;
@@ -46,12 +46,53 @@ fn int_param(p: &Value, key: &str, lo: u32, hi: u32, default: u32) -> Result<u32
     }
 }
 
-fn parse_spec(p: &Value) -> Result<LumSpec> {
+/// An optional number in `lo..=hi`, or `default` when absent. Anything else is an error.
+fn num_param(p: &Value, key: &str, lo: f64, hi: f64, default: f64) -> Result<f64> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => match v.as_f64() {
+            Some(n) if n.is_finite() && (lo..=hi).contains(&n) => Ok(n),
+            _ => Err(bad(format!("`{key}` must be a number {lo}..{hi}"))),
+        },
+    }
+}
+
+fn parse_spec(p: &Value) -> Result<MaskSpec> {
     let kind = match p.get("kind") {
-        None | Some(Value::Null) => LumKind::Lights,
-        Some(v) => v.as_str().and_then(LumKind::parse).ok_or_else(|| bad("`kind` must be lights, darks, mids or zone"))?,
+        None | Some(Value::Null) => "lights",
+        Some(v) => v.as_str().ok_or_else(|| bad("`kind` must be a string"))?,
     };
-    Ok(LumSpec { kind, level: int_param(p, "level", 1, MAX_LEVEL, 1)?, zone: int_param(p, "zone", 0, MAX_ZONE, 5)? })
+    match kind {
+        "range" => {
+            let (low, high) = (num_param(p, "low", 0.0, 100.0, 30.0)?, num_param(p, "high", 0.0, 100.0, 70.0)?);
+            if low > high {
+                return Err(bad("`low` must not be above `high`"));
+            }
+            Ok(MaskSpec::Range { low: (low / 100.0) as f32, high: (high / 100.0) as f32, soft: (num_param(p, "softness", 0.0, 50.0, 10.0)? / 100.0) as f32 })
+        }
+        "color" | "colour" => {
+            let hue = match (p.get("color").or_else(|| p.get("colour")), p.get("hue")) {
+                (Some(c), _) if !c.is_null() => {
+                    let name = c.as_str().ok_or_else(|| bad("`color` must be a name"))?;
+                    COLOURS.iter().find(|(n, _)| *n == name || n.trim_end_matches('s') == name).map(|(_, h)| f64::from(*h)).ok_or_else(|| {
+                        bad(format!("`color` must be one of {}", COLOURS.iter().map(|c| c.0).collect::<Vec<_>>().join(", ")))
+                    })?
+                }
+                (_, Some(h)) if !h.is_null() => num_param(p, "hue", 0.0, 360.0, 0.0)?,
+                _ => 0.0,
+            };
+            Ok(MaskSpec::Hue {
+                hue: hue as f32,
+                width: num_param(p, "width", 0.0, 180.0, 30.0)? as f32,
+                soft: num_param(p, "softness", 0.0, 180.0, 30.0)? as f32,
+                min_chroma: (num_param(p, "minChroma", 0.0, 100.0, 8.0)? / 100.0) as f32,
+            })
+        }
+        other => {
+            let kind = LumKind::parse(other).ok_or_else(|| bad("`kind` must be lights, darks, mids, zone, range or color"))?;
+            Ok(MaskSpec::Luma(LumSpec { kind, level: int_param(p, "level", 1, MAX_LEVEL, 1)?, zone: int_param(p, "zone", 0, MAX_ZONE, 5)? }))
+        }
+    }
 }
 
 fn parse_mode(p: &Value) -> Result<SelectionMode> {
@@ -66,12 +107,16 @@ fn parse_mode(p: &Value) -> Result<SelectionMode> {
     }
 }
 
-fn label(spec: LumSpec) -> String {
-    match spec.kind {
-        LumKind::Lights => format!("Lights {} Mask", spec.level),
-        LumKind::Darks => format!("Darks {} Mask", spec.level),
-        LumKind::Mids => format!("Mids {} Mask", spec.level),
-        LumKind::Zone => format!("Zone {} Mask", spec.zone),
+fn label(spec: MaskSpec) -> String {
+    match spec {
+        MaskSpec::Luma(s) => match s.kind {
+            LumKind::Lights => format!("Lights {} Mask", s.level),
+            LumKind::Darks => format!("Darks {} Mask", s.level),
+            LumKind::Mids => format!("Mids {} Mask", s.level),
+            LumKind::Zone => format!("Zone {} Mask", s.zone),
+        },
+        MaskSpec::Range { low, high, .. } => format!("Range {:.0}–{:.0}% Mask", low * 100.0, high * 100.0),
+        MaskSpec::Hue { hue, .. } => COLOURS.iter().find(|(_, h)| (*h - hue).abs() < 0.5).map_or_else(|| format!("Hue {hue:.0}° Mask"), |(n, _)| format!("{} Mask", n.trim_end_matches('s'))),
     }
 }
 
@@ -107,7 +152,7 @@ fn select_luminosity(s: &mut Session, p: &Value) -> Result<Value> {
         if px.len() != want {
             return Err(bad("could not read the document's pixels"));
         }
-        mask.extend(band_bytes(&px, spec));
+        mask.extend(band_bytes_for(&px, spec));
         y = y1;
     }
     let total: f64 = mask.iter().map(|v| f64::from(*v) / 255.0).sum();
@@ -136,7 +181,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Luminosity Mask",
         menu: &["Select"],
         shortcut: None,
-        params: r##"{"kind":"lights|darks|mids|zone"="lights","level":1..8=1 (lights/darks/mids: higher = narrower),"zone":0..10=5 (kind zone: the eleven-zone scale),"mode":"replace|add|subtract|intersect"="replace","sampleAllLayers":bool=true,"feather":0..250 px=0 (softens the mask's edge before it is combined)} → {selected, changed, coverage (0–1 of the canvas), bounds}"##,
+        params: r##"{"kind":"lights|darks|mids|zone|range|color"="lights","level":1..8=1 (lights/darks/mids: higher = narrower),"zone":0..10=5 (kind zone: the eleven-zone scale),"low":0..100=30,"high":0..100=70,"softness":range: 0..50 % (default 10) / color: 0..180° (default 30) (kind range: a brightness band, full between low and high %),"color":reds|yellows|greens|cyans|blues|magentas,"hue":0..360°,"width":0..180°=30,"minChroma":0..100 %=8 (kind color: pixels of that hue; greys and near-blacks fade out),"mode":"replace|add|subtract|intersect"="replace","sampleAllLayers":bool=true,"feather":0..250 px=0 (softens the mask's edge before it is combined)} → {selected, changed, coverage (0–1 of the canvas), bounds}"##,
         enabled: has_doc,
         run: select_luminosity,
         journal: true,
@@ -222,6 +267,76 @@ mod tests {
         let r = s.execute(CMD, json!({"kind": "darks", "level": 8})).unwrap();
         assert_eq!(r["changed"], json!(false));
         assert!(s.active().unwrap().doc.selection.is_none());
+    }
+
+    /// Left half red, right half green.
+    fn swatches() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 100, "height": 20})).unwrap();
+        s.edit("paint", |doc, active| {
+            let surf = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
+            let n = surf.channels();
+            for y in 0..20 {
+                for x in 0..100 {
+                    let mut px = vec![1.0f32; n];
+                    px[..3].copy_from_slice(if x < 50 { &[1.0, 0.0, 0.0] } else { &[0.0, 1.0, 0.0] });
+                    surf.write_pixel(x, y, &px);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn colour_masks_select_their_hue() {
+        let mut s = swatches();
+        s.execute(CMD, json!({"kind": "color", "color": "reds"})).unwrap();
+        assert!(cov(&s, 10) > 0.95 && cov(&s, 90) < 0.05, "reds: {} {}", cov(&s, 10), cov(&s, 90));
+        s.execute(CMD, json!({"kind": "color", "color": "green"})).unwrap();
+        assert!(cov(&s, 90) > 0.95 && cov(&s, 10) < 0.05, "singular names work");
+        s.execute(CMD, json!({"kind": "colour", "hue": 120, "width": 10, "softness": 5})).unwrap();
+        assert!(cov(&s, 90) > 0.95 && cov(&s, 10) < 0.05, "a numeric hue");
+        let none = s.execute(CMD, json!({"kind": "color", "color": "blues"})).unwrap();
+        assert_eq!(none["changed"], json!(false), "nothing blue here: the selection is left alone");
+        // Combining: reds, then add greens.
+        let mut s = swatches();
+        s.execute(CMD, json!({"kind": "color", "color": "reds"})).unwrap();
+        s.execute(CMD, json!({"kind": "color", "color": "greens", "mode": "add"})).unwrap();
+        assert!(cov(&s, 10) > 0.95 && cov(&s, 90) > 0.95);
+    }
+
+    #[test]
+    fn custom_ranges_select_a_brightness_band() {
+        let mut s = ramp(8);
+        s.execute(CMD, json!({"kind": "range", "low": 40, "high": 60, "softness": 5})).unwrap();
+        assert!(cov(&s, 50) > 0.95 && cov(&s, 20) < 0.05 && cov(&s, 80) < 0.05, "{} {} {}", cov(&s, 20), cov(&s, 50), cov(&s, 80));
+        let mut s = ramp(16);
+        s.execute(CMD, json!({"kind": "range", "low": 0, "high": 100})).unwrap();
+        assert!(cov(&s, 0) > 0.95 && cov(&s, 99) > 0.95, "the whole range");
+        assert!(s.execute(CMD, json!({"kind": "range", "low": 80, "high": 20})).is_err());
+    }
+
+    #[test]
+    fn custom_and_colour_params_are_validated() {
+        let mut s = swatches();
+        for p in [
+            json!({"kind": "color", "color": "purple"}),
+            json!({"kind": "color", "color": 4}),
+            json!({"kind": "color", "hue": 400}),
+            json!({"kind": "color", "hue": "x"}),
+            json!({"kind": "color", "width": -1}),
+            json!({"kind": "color", "softness": 999}),
+            json!({"kind": "color", "minChroma": 101}),
+            json!({"kind": "range", "low": -1}),
+            json!({"kind": "range", "high": 101}),
+            json!({"kind": "range", "softness": 51}),
+            json!({"kind": 7}),
+            json!({"kind": "sepia"}),
+        ] {
+            assert!(s.execute(CMD, p.clone()).is_err(), "{p}");
+        }
     }
 
     #[test]
