@@ -1133,6 +1133,14 @@ pub struct UiState {
     /// exposed to automation but never restored from settings.
     #[serde(default, skip_deserializing)]
     pub layer_picker: Option<crate::layer_picker::LayerPicker>,
+    /// Swift Match's guided colours (`match_guides`) and whether only they are matched.
+    #[serde(default)]
+    pub match_guides: Vec<crate::match_guides::MatchGuide>,
+    #[serde(default)]
+    pub match_only_guided: bool,
+    /// The armed guide eyedropper, exposed to automation but never restored from settings.
+    #[serde(default, skip_deserializing)]
+    pub match_picker: Option<crate::match_guides::MatchPick>,
     /// Clone Stamp / Healing source point (⌥-click) and the aligned offset once a stroke started.
     #[serde(default)]
     pub clone_source: Option<[f64; 2]>,
@@ -1329,6 +1337,9 @@ impl Default for UiState {
             transform_unlinked: false,
             symmetry_transform: None,
             layer_picker: None,
+            match_guides: Vec::new(),
+            match_only_guided: false,
+            match_picker: None,
             mask_target: false,
             vector_mask_target: false,
             properties_layer: None,

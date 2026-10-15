@@ -3019,6 +3019,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     crate::magnetic_lasso_ui::frame(app);
     // A Properties Levels/Curves eyedropper left behind by a tool or layer switch is dropped.
     crate::layer_picker::prune(app);
+    crate::match_guides::prune(app);
     // Held keys (hold_keys.rs): Space repositions a crop frame, marquee, lasso or shape being
     // drawn; otherwise Space is the Hand and ⌘Space / ⌥Space the Zoom tool while held.
     let reposition = crate::hold_keys::reposition_held(app, &ctx);
@@ -3134,7 +3135,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         view.center[1] -= d.y;
         // The tool cursors below are skipped while panning: the fist is set here (#2196).
         ctx.set_cursor_icon(crate::tool_cursor::hand(&ctx, true));
-    } else if primary && !stroke_dismissal && temporary.is_none() && !middle && crate::layer_picker::armed(app).is_some() {
+    } else if primary && !stroke_dismissal && temporary.is_none() && !middle && (crate::layer_picker::armed(app).is_some() || crate::match_guides::armed(app)) {
         // A Properties Levels/Curves eyedropper (layer_picker.rs) owns the image until Esc or another
         // tool; Space and the middle button still pan. It samples on the press.
         if response.hovered()
@@ -3151,7 +3152,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
         {
             let d = xf.to_doc(p);
-            crate::layer_picker::sample_at(app, d[0], d[1]);
+            if !crate::match_guides::sample_at(app, d[0], d[1]) {
+                crate::layer_picker::sample_at(app, d[0], d[1]);
+            }
         }
     } else if primary && !stroke_dismissal {
         let mods = ui.input(|i| i.modifiers);

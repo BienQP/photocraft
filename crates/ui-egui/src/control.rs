@@ -992,8 +992,8 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     continue;
                 }
                 // A Properties Levels/Curves eyedropper owns the primary button the same way.
-                if app.ui.dialogs.is_empty() && !matches!(s("button"), Some("secondary" | "right")) && crate::layer_picker::armed(app).is_some() {
-                    if matches!(ev, ToolEvent::Down { .. }) {
+                if app.ui.dialogs.is_empty() && !matches!(s("button"), Some("secondary" | "right")) && (crate::layer_picker::armed(app).is_some() || crate::match_guides::armed(app)) {
+                    if matches!(ev, ToolEvent::Down { .. }) && !crate::match_guides::sample_at(app, x, y) {
                         crate::layer_picker::sample_at(app, x, y);
                     }
                     continue;
@@ -1254,6 +1254,8 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         "camTransform": app.ui.cam_transform,
         "layerMenu": app.ui.layer_menu,
         "layerPicker": app.ui.layer_picker,
+        "matchPicker": app.ui.match_picker,
+        "matchGuides": app.ui.match_guides,
         "brushPicker": app.ui.brush_picker.map(|pos| json!({
             "pos": pos,
             // The picker's content size once its corner grip was dragged (null: the default).
