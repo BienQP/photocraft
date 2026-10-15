@@ -138,7 +138,7 @@ pub fn controls(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> Value {
                     });
                 }
                 dropper(app, ui, i, Slot::To);
-                if ui.small_button("✕").on_hover_text("Remove this guide").clicked() {
+                if ui.small_button("×").on_hover_text("Remove this guide").clicked() {
                     remove = Some(i);
                 }
             });
