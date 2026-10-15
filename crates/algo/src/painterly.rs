@@ -9,6 +9,11 @@
 //! reaches its maximum length or the canvas already matches the picture better than the stroke
 //! would. Big brushes lay the broad shapes; smaller ones come back only where detail needs them.
 //!
+//! Strokes are clipped at edges, as in the paper: a stroke stops where its path would cross a
+//! strong edge of the picture, and its brush never paints across one, so paint stays inside
+//! shapes instead of smearing a colour over the boundary. The edge map is the gradient of the
+//! lightly blurred luminance; [`Params::clip`] sets how faint an edge still counts.
+//!
 //! Every pass is returned on its own transparent layer, so the caller can mask, fade or repaint
 //! any of them. Output is deterministic for a given seed. Strokes are stamped as soft discs; a
 //! stroke never doubles its own opacity where it overlaps itself.
@@ -44,12 +49,14 @@ pub struct Params {
     pub max_steps: u32,
     /// Random colour variation per stroke, 0..=1.
     pub jitter: f32,
+    /// Edge clipping, 0..=1: 0 = strokes may cross anything, 1 = even faint edges stop them.
+    pub clip: f32,
     pub seed: u64,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { radii: vec![16.0, 8.0, 4.0], grid: 1.0, threshold: 0.08, straightness: 0.5, blur: 0.5, opacity: 1.0, min_steps: 4, max_steps: 16, jitter: 0.2, seed: 1 }
+        Params { radii: vec![16.0, 8.0, 4.0], grid: 1.0, threshold: 0.08, straightness: 0.5, blur: 0.5, opacity: 1.0, min_steps: 4, max_steps: 16, jitter: 0.2, clip: 0.0, seed: 1 }
     }
 }
 
@@ -75,6 +82,7 @@ impl Params {
             min_steps,
             max_steps: self.max_steps.clamp(min_steps, MAX_STROKE_STEPS),
             jitter: f(self.jitter, 0.0, 1.0, 0.2),
+            clip: f(self.clip, 0.0, 1.0, 0.0),
             seed: self.seed,
         }
     }
@@ -88,10 +96,10 @@ pub const PRESETS: [&str; 4] = ["impressionist", "oil", "pointillist", "wash"];
 pub fn preset(name: &str, longest: usize) -> Option<Params> {
     let px = |pct: f32| (longest as f32 * pct / 100.0).clamp(MIN_RADIUS, MAX_RADIUS);
     Some(match name {
-        "impressionist" => Params { radii: vec![px(1.6), px(0.8), px(0.4)], threshold: 0.08, straightness: 0.4, min_steps: 4, max_steps: 14, jitter: 0.3, ..Params::default() },
-        "oil" => Params { radii: vec![px(1.2), px(0.6), px(0.3)], threshold: 0.06, straightness: 0.3, blur: 0.4, opacity: 0.9, min_steps: 6, max_steps: 24, jitter: 0.15, ..Params::default() },
-        "pointillist" => Params { radii: vec![px(0.5), px(0.3)], threshold: 0.04, straightness: 1.0, min_steps: 1, max_steps: 1, jitter: 0.5, ..Params::default() },
-        "wash" => Params { radii: vec![px(2.4), px(1.2)], threshold: 0.12, straightness: 0.5, blur: 0.8, opacity: 0.35, min_steps: 6, max_steps: 20, jitter: 0.1, ..Params::default() },
+        "impressionist" => Params { radii: vec![px(1.6), px(0.8), px(0.4)], threshold: 0.08, straightness: 0.4, min_steps: 4, max_steps: 14, jitter: 0.3, clip: 0.5, ..Params::default() },
+        "oil" => Params { radii: vec![px(1.2), px(0.6), px(0.3)], threshold: 0.06, straightness: 0.3, blur: 0.4, opacity: 0.9, min_steps: 6, max_steps: 24, jitter: 0.15, clip: 0.6, ..Params::default() },
+        "pointillist" => Params { radii: vec![px(0.5), px(0.3)], threshold: 0.04, straightness: 1.0, min_steps: 1, max_steps: 1, jitter: 0.5, clip: 0.3, ..Params::default() },
+        "wash" => Params { radii: vec![px(2.4), px(1.2)], threshold: 0.12, straightness: 0.5, blur: 0.8, opacity: 0.35, min_steps: 6, max_steps: 20, jitter: 0.1, clip: 0.25, ..Params::default() },
         _ => return None,
     })
 }
@@ -131,6 +139,79 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     (r * r + g * g + bl * bl).sqrt() * 0.577_350_3
 }
 
+/// Strong edges of the picture, for clipping strokes.
+struct Edges {
+    w: usize,
+    h: usize,
+    mask: Vec<bool>,
+    /// One flag per 8×8 block: does it hold any edge pixel (a cheap reject before marching).
+    blocks: Vec<bool>,
+    bw: usize,
+}
+
+const BLOCK: usize = 8;
+
+impl Edges {
+    /// `None` when clipping is off.
+    fn build(channels: &[Vec<f32>; 3], w: usize, h: usize, clip: f32) -> Option<Edges> {
+        if clip <= 0.0 {
+            return None;
+        }
+        let lum: Vec<f32> = (0..w * h).map(|i| 0.3 * channels[0][i] + 0.59 * channels[1][i] + 0.11 * channels[2][i]).collect();
+        let lum = gaussian_blur(&lum, w, h, 1.0);
+        let thr = 0.12 - 0.10 * clip;
+        let at = |x: usize, y: usize| lum.get(y * w + x).copied().unwrap_or(0.0);
+        let mut mask = vec![false; w * h];
+        let bw = w.div_ceil(BLOCK);
+        let mut blocks = vec![false; bw * h.div_ceil(BLOCK)];
+        for y in 0..h {
+            let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
+            for x in 0..w {
+                let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
+                let (gx, gy) = ((at(x1, y) - at(x0, y)) * 0.5, (at(x, y1) - at(x, y0)) * 0.5);
+                if gx * gx + gy * gy > thr * thr {
+                    mask[y * w + x] = true;
+                    blocks[(y / BLOCK) * bw + x / BLOCK] = true;
+                }
+            }
+        }
+        Some(Edges { w, h, mask, blocks, bw })
+    }
+
+    fn is_edge(&self, x: i64, y: i64) -> bool {
+        x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h && self.mask.get(y as usize * self.w + x as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether any edge pixel may lie in the box (inclusive, in pixels).
+    fn any_near(&self, x0: i64, y0: i64, x1: i64, y1: i64) -> bool {
+        let (bx0, bx1) = (x0.max(0) as usize / BLOCK, (x1.max(0) as usize / BLOCK).min(self.bw.saturating_sub(1)));
+        let (by0, by1) = (y0.max(0) as usize / BLOCK, (y1.max(0) as usize / BLOCK).min(self.h.div_ceil(BLOCK).saturating_sub(1)));
+        (by0..=by1).any(|by| (bx0..=bx1).any(|bx| self.blocks.get(by * self.bw + bx).copied().unwrap_or(false)))
+    }
+
+    /// Whether the straight path `a → b` crosses an edge: runs into an edge band and out the other
+    /// side. A path that ends inside a band doesn't count (so band pixels can be painted from
+    /// either side and no gap is left), and neither does leaving a band `a` starts in.
+    fn blocked(&self, a: (f32, f32), b: (f32, f32)) -> bool {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let d = (dx * dx + dy * dy).sqrt();
+        let steps = (d / 0.7).ceil() as usize;
+        // 0 = in open ground, 1 = inside a band entered from open ground, 2 = in the start's band.
+        let mut state = if self.is_edge(a.0.round() as i64, a.1.round() as i64) { 2 } else { 0 };
+        for k in 1..=steps {
+            let t = k as f32 / steps as f32;
+            let edge = self.is_edge((a.0 + dx * t).round() as i64, (a.1 + dy * t).round() as i64);
+            match (state, edge) {
+                (0, true) => state = 1,
+                (1, false) => return true,
+                (2, false) => state = 0,
+                _ => {}
+            }
+        }
+        false
+    }
+}
+
 struct Canvas {
     w: usize,
     /// Premultiplied accumulation of every pass so far.
@@ -166,6 +247,7 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
     let mut cover = vec![0.0f32; n];
     let mut touched: Vec<usize> = Vec::new();
     let channels: [Vec<f32>; 3] = std::array::from_fn(|c| src.iter().map(|q| if q[c].is_finite() { q[c].clamp(0.0, 1.0) } else { 0.0 }).collect());
+    let edges = Edges::build(&channels, w, h, p.clip);
 
     for &radius in &p.radii {
         let sigma = (p.blur * radius).min(40.0);
@@ -216,7 +298,14 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
         let mut layer = vec![[0.0f32; 4]; n];
         let step = (0.5 * radius).max(1.0);
         for &(sx, sy) in &seeds {
-            let base = refc(sx, sy);
+            // With clipping on, the colour leans toward the unblurred picture at the seed, so a
+            // stroke seeded next to an edge keeps its own side's colour, not the blur's grey.
+            let soft = refc(sx, sy);
+            let si = sy * w + sx;
+            let base: [f32; 3] = std::array::from_fn(|c| {
+                let sharp = channels[c].get(si).copied().unwrap_or(soft[c]);
+                soft[c] + (sharp - soft[c]) * p.clip
+            });
             let shift = (rng.unit() - 0.5) * p.jitter * 0.2;
             let colour: [f32; 3] = std::array::from_fn(|c| (base[c] + shift + (rng.unit() - 0.5) * p.jitter * 0.06).clamp(0.0, 1.0));
             // Follow the contour: perpendicular to the gradient, smoothed by the curvature filter.
@@ -255,8 +344,17 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
                     break;
                 }
                 d = (d.0 / len, d.1 / len);
-                x += step * d.0;
-                y += step * d.1;
+                let (nx, ny) = (x + step * d.0, y + step * d.1);
+                if let Some(e) = &edges {
+                    // A stroke ends where it would run into an edge (one that starts on an edge
+                    // band may follow it).
+                    let (ox, oy) = (x.round() as i64, y.round() as i64);
+                    if (e.is_edge(nx.round() as i64, ny.round() as i64) && !e.is_edge(ox, oy)) || e.blocked((x, y), (nx, ny)) {
+                        break;
+                    }
+                }
+                x = nx;
+                y = ny;
                 last = d;
                 pts.push((x, y));
             }
@@ -264,11 +362,12 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
             let reach = radius.ceil() as i64 + 1;
             for &(px, py) in &pts {
                 let (cx, cy) = (px.round() as i64, py.round() as i64);
+                let clipper = edges.as_ref().filter(|e| e.any_near(cx - reach, cy - reach, cx + reach, cy + reach));
                 for yy in (cy - reach).max(0)..=(cy + reach).min(h as i64 - 1) {
                     for xx in (cx - reach).max(0)..=(cx + reach).min(w as i64 - 1) {
                         let d = ((xx as f32 - px).powi(2) + (yy as f32 - py).powi(2)).sqrt();
                         let m = (radius + 0.5 - d).clamp(0.0, 1.0);
-                        if m > 0.0 {
+                        if m > 0.0 && !clipper.is_some_and(|e| e.blocked((px, py), (xx as f32, yy as f32))) {
                             let i = yy as usize * w + xx as usize;
                             if let Some(c) = cover.get_mut(i) {
                                 if *c == 0.0 {
@@ -414,6 +513,7 @@ mod tests {
             min_steps: 0,
             max_steps: u32::MAX,
             jitter: f32::NAN,
+            clip: f32::NAN,
             seed: 0,
         };
         let s = hostile.sanitized();
@@ -424,5 +524,72 @@ mod tests {
         assert!(!out.is_empty());
         let nan_src = vec![[f32::NAN, f32::INFINITY, -3.0, 1.0]; 16];
         assert!(paint(&nan_src, 4, 4, &small()).is_ok());
+    }
+
+    /// Left half black, right half white, an edge at x = 32.
+    fn two_tone(w: usize, h: usize) -> Vec<[f32; 4]> {
+        (0..w * h).map(|i| if i % w < w / 2 { [0.0, 0.0, 0.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] }).collect()
+    }
+
+    /// The darkest painted pixel on the white side and the lightest on the black side, a few
+    /// pixels clear of the edge.
+    fn leak(passes: &[Pass], w: usize, h: usize) -> (f32, f32) {
+        let (mut white_min, mut black_max) = (1.0f32, 0.0f32);
+        for pass in passes {
+            for y in 0..h {
+                for x in 0..w {
+                    let q = pass.px[y * w + x];
+                    if q[3] < 0.5 {
+                        continue;
+                    }
+                    let l = (q[0] + q[1] + q[2]) / 3.0;
+                    if x >= w / 2 + 3 {
+                        white_min = white_min.min(l);
+                    } else if x + 3 < w / 2 {
+                        black_max = black_max.max(l);
+                    }
+                }
+            }
+        }
+        (white_min, black_max)
+    }
+
+    #[test]
+    fn clipping_keeps_paint_inside_shapes() {
+        let (w, h) = (64, 48);
+        let src = two_tone(w, h);
+        let base = Params { radii: vec![10.0], jitter: 0.0, opacity: 1.0, straightness: 1.0, max_steps: 12, ..Params::default() };
+        let off = paint(&src, w, h, &base).unwrap();
+        let on = paint(&src, w, h, &Params { clip: 1.0, ..base.clone() }).unwrap();
+        let (wo, bo) = leak(&off, w, h);
+        let (wc, bc) = leak(&on, w, h);
+        assert!(wo < 0.9 || bo > 0.1, "without clipping paint crosses the edge: {wo} {bo}");
+        assert!(wc > 0.9 && bc < 0.1, "with clipping it doesn't: white side {wc}, black side {bc}");
+        let out = composite(&on, w * h);
+        let bare: Vec<(usize, usize)> = out.iter().enumerate().filter(|(_, q)| q[3] < 0.99).map(|(i, _)| (i % w, i / w)).collect();
+        assert!(bare.is_empty(), "clipping leaves no bare canvas: {} bare, e.g. {:?}", bare.len(), &bare[..bare.len().min(12)]);
+    }
+
+    #[test]
+    fn clipping_does_not_touch_a_picture_without_edges() {
+        let (w, h) = (40, 40);
+        let src = vec![[0.5, 0.4, 0.3, 1.0]; w * h];
+        let a = paint(&src, w, h, &small()).unwrap();
+        let b = paint(&src, w, h, &Params { clip: 1.0, ..small() }).unwrap();
+        for (pa, pb) in a.iter().zip(&b) {
+            assert_eq!(pa.strokes, pb.strokes);
+            assert!(mean_err(&pa.px, &pb.px) < 1e-3);
+        }
+    }
+
+    #[test]
+    fn clipping_is_deterministic_and_safe_on_hostile_pictures() {
+        let (w, h) = (33, 17);
+        let src: Vec<[f32; 4]> = (0..w * h).map(|i| if i % 7 == 0 { [f32::NAN, 9.0, -1.0, 1.0] } else { [(i % 5) as f32 / 4.0; 4] }).collect();
+        let p = Params { clip: 1.0, ..small() };
+        assert_eq!(paint(&src, w, h, &p).unwrap(), paint(&src, w, h, &p).unwrap());
+        // One-pixel-wide pictures have no room for a gradient but must not panic.
+        assert!(paint(&[[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]], 1, 2, &p).is_ok());
+        assert!(paint(&[[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]], 2, 1, &p).is_ok());
     }
 }

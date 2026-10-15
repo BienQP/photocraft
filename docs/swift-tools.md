@@ -47,6 +47,12 @@ sample the active picture only, not the reference.
 "Swift Paint (preset)" group, so any pass can be masked or faded. Presets: impressionist, oil,
 pointillist, wash. Each press uses a new seed.
 
+**Edge clipping** (`edgeClip`, 0–100, preset defaults 25–60): a stroke stops where its path would run into a
+strong edge of the picture, and the brush never paints across one, so paint stays inside shapes.
+Edges are the gradient of the lightly blurred luminance; higher values count fainter edges. With
+clipping on, a stroke's colour leans toward the unblurred picture at its seed, so strokes next to
+an edge keep their own side's colour.
+
 ## Swift Brush
 
 Quick controls, brush-group colours and tags, and four stroke-preview styles. Tags and colours
@@ -54,6 +60,7 @@ live in panel UI state, not in presets or `.abr` files, and are lost when a grou
 
 ## Known limits
 
-- Swift Paint is sequential and has not been timed on 24–36 MP images in release.
+- Swift Paint is sequential and has not been timed on 24–36 MP images in release (edge clipping adds
+  an edge map and a line-of-sight check per stamped pixel near edges; not yet measured).
 - Not verified on wasm in the build sandbox (`cargo xtask wasm` needs the target installed).
 - Preview styles are original, not copies of any plug-in's.
