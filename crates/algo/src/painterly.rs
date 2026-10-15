@@ -14,6 +14,11 @@
 //! shapes instead of smearing a colour over the boundary. The edge map is the gradient of the
 //! lightly blurred luminance; [`Params::clip`] sets how faint an edge still counts.
 //!
+//! Bristle texture ([`Params::bristles`]): each stroke carries a fixed set of bristles across its
+//! width. A pixel's bristle is found from its distance to the side of the stroke's path, so the
+//! streaks run along the stroke and bend with it. Each bristle thins the paint (opacity) and
+//! nudges its lightness a little, which reads as dry-brush streaks rather than flat blobs.
+//!
 //! Every pass is returned on its own transparent layer, so the caller can mask, fade or repaint
 //! any of them. Output is deterministic for a given seed. Strokes are stamped as soft discs; a
 //! stroke never doubles its own opacity where it overlaps itself.
@@ -49,6 +54,8 @@ pub struct Params {
     pub max_steps: u32,
     /// Random colour variation per stroke, 0..=1.
     pub jitter: f32,
+    /// Bristle texture depth, 0..=1: 0 = smooth strokes, 1 = strongly streaked.
+    pub bristles: f32,
     /// Edge clipping, 0..=1: 0 = strokes may cross anything, 1 = even faint edges stop them.
     pub clip: f32,
     pub seed: u64,
@@ -56,7 +63,7 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Params { radii: vec![16.0, 8.0, 4.0], grid: 1.0, threshold: 0.08, straightness: 0.5, blur: 0.5, opacity: 1.0, min_steps: 4, max_steps: 16, jitter: 0.2, clip: 0.0, seed: 1 }
+        Params { radii: vec![16.0, 8.0, 4.0], grid: 1.0, threshold: 0.08, straightness: 0.5, blur: 0.5, opacity: 1.0, min_steps: 4, max_steps: 16, jitter: 0.2, bristles: 0.0, clip: 0.0, seed: 1 }
     }
 }
 
@@ -82,6 +89,7 @@ impl Params {
             min_steps,
             max_steps: self.max_steps.clamp(min_steps, MAX_STROKE_STEPS),
             jitter: f(self.jitter, 0.0, 1.0, 0.2),
+            bristles: f(self.bristles, 0.0, 1.0, 0.0),
             clip: f(self.clip, 0.0, 1.0, 0.0),
             seed: self.seed,
         }
@@ -96,10 +104,10 @@ pub const PRESETS: [&str; 4] = ["impressionist", "oil", "pointillist", "wash"];
 pub fn preset(name: &str, longest: usize) -> Option<Params> {
     let px = |pct: f32| (longest as f32 * pct / 100.0).clamp(MIN_RADIUS, MAX_RADIUS);
     Some(match name {
-        "impressionist" => Params { radii: vec![px(1.6), px(0.8), px(0.4)], threshold: 0.08, straightness: 0.4, min_steps: 4, max_steps: 14, jitter: 0.3, clip: 0.5, ..Params::default() },
-        "oil" => Params { radii: vec![px(1.2), px(0.6), px(0.3)], threshold: 0.06, straightness: 0.3, blur: 0.4, opacity: 0.9, min_steps: 6, max_steps: 24, jitter: 0.15, clip: 0.6, ..Params::default() },
+        "impressionist" => Params { radii: vec![px(1.6), px(0.8), px(0.4)], threshold: 0.08, straightness: 0.4, min_steps: 4, max_steps: 14, jitter: 0.3, clip: 0.5, bristles: 0.35, ..Params::default() },
+        "oil" => Params { radii: vec![px(1.2), px(0.6), px(0.3)], threshold: 0.06, straightness: 0.3, blur: 0.4, opacity: 0.9, min_steps: 6, max_steps: 24, jitter: 0.15, clip: 0.6, bristles: 0.6, ..Params::default() },
         "pointillist" => Params { radii: vec![px(0.5), px(0.3)], threshold: 0.04, straightness: 1.0, min_steps: 1, max_steps: 1, jitter: 0.5, clip: 0.3, ..Params::default() },
-        "wash" => Params { radii: vec![px(2.4), px(1.2)], threshold: 0.12, straightness: 0.5, blur: 0.8, opacity: 0.35, min_steps: 6, max_steps: 20, jitter: 0.1, clip: 0.25, ..Params::default() },
+        "wash" => Params { radii: vec![px(2.4), px(1.2)], threshold: 0.12, straightness: 0.5, blur: 0.8, opacity: 0.35, min_steps: 6, max_steps: 20, jitter: 0.1, clip: 0.25, bristles: 0.15, ..Params::default() },
         _ => return None,
     })
 }
@@ -137,6 +145,27 @@ impl Rng {
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     let (r, g, bl) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
     (r * r + g * g + bl * bl).sqrt() * 0.577_350_3
+}
+
+/// A deterministic hash of two integers to `0..1`.
+fn hash01(a: u32, b: u32) -> f32 {
+    let mut h = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0xC2B2_AE3D;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Smooth 1-D noise in `0..1`: the bristle at lateral position `u` (in bristle widths) of the
+/// stroke numbered `phase`.
+fn bristle(phase: u32, u: f32) -> f32 {
+    let (i, f) = (u.floor(), u - u.floor());
+    let t = f * f * (3.0 - 2.0 * f);
+    let a = hash01(phase, i as i32 as u32);
+    let b = hash01(phase, (i as i32).wrapping_add(1) as u32);
+    a + (b - a) * t
 }
 
 /// Strong edges of the picture, for clipping strokes.
@@ -245,6 +274,8 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
     let mut passes = Vec::with_capacity(p.radii.len());
     // Per-stroke coverage, kept so a stroke never doubles its own opacity; reset after each stroke.
     let mut cover = vec![0.0f32; n];
+    // Bristle value (0..1) of the stamp that set each covered pixel; only used with texture on.
+    let mut shade = vec![0.5f32; n];
     let mut touched: Vec<usize> = Vec::new();
     let channels: [Vec<f32>; 3] = std::array::from_fn(|c| src.iter().map(|q| if q[c].is_finite() { q[c].clamp(0.0, 1.0) } else { 0.0 }).collect());
     let edges = Edges::build(&channels, w, h, p.clip);
@@ -310,6 +341,9 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
             let colour: [f32; 3] = std::array::from_fn(|c| (base[c] + shift + (rng.unit() - 0.5) * p.jitter * 0.06).clamp(0.0, 1.0));
             // Follow the contour: perpendicular to the gradient, smoothed by the curvature filter.
             let heading = rng.unit() * std::f32::consts::TAU;
+            // Texture draws from the generator only when on, so smooth strokes stay as they were.
+            let phase = if p.bristles > 0.0 { (rng.next() >> 32) as u32 } else { 0 };
+            let per_width = (radius * 0.8).clamp(3.0, 14.0);
             let mut pts = vec![(sx as f32, sy as f32)];
             let (mut x, mut y, mut last) = (sx as f32, sy as f32, (0.0f32, 0.0f32));
             for i in 1..=p.max_steps {
@@ -360,7 +394,16 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
             }
             // Stamp the stroke: soft discs along the path, max-combined, then composited once.
             let reach = radius.ceil() as i64 + 1;
-            for &(px, py) in &pts {
+            for (k, &(px, py)) in pts.iter().enumerate() {
+                // Direction of travel here, for the bristles' lateral axis.
+                let (nx, ny) = match (pts.get(k + 1), k.checked_sub(1).and_then(|j| pts.get(j))) {
+                    (Some(q), _) | (None, Some(q)) => {
+                        let (ux, uy) = if k + 1 < pts.len() { (q.0 - px, q.1 - py) } else { (px - q.0, py - q.1) };
+                        let l = (ux * ux + uy * uy).sqrt();
+                        if l > 1e-6 { (-uy / l, ux / l) } else { (-heading.sin(), heading.cos()) }
+                    }
+                    (None, None) => (-heading.sin(), heading.cos()),
+                };
                 let (cx, cy) = (px.round() as i64, py.round() as i64);
                 let clipper = edges.as_ref().filter(|e| e.any_near(cx - reach, cy - reach, cx + reach, cy + reach));
                 for yy in (cy - reach).max(0)..=(cy + reach).min(h as i64 - 1) {
@@ -369,11 +412,23 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
                         let m = (radius + 0.5 - d).clamp(0.0, 1.0);
                         if m > 0.0 && !clipper.is_some_and(|e| e.blocked((px, py), (xx as f32, yy as f32))) {
                             let i = yy as usize * w + xx as usize;
+                            let (m, b) = if p.bristles > 0.0 {
+                                let lateral = (((xx as f32 - px) * nx + (yy as f32 - py) * ny) / radius).clamp(-1.0, 1.0);
+                                let b = bristle(phase, (lateral * 0.5 + 0.5) * per_width);
+                                (m * (1.0 - 0.5 * p.bristles * (1.0 - b)), b)
+                            } else {
+                                (m, 0.5)
+                            };
                             if let Some(c) = cover.get_mut(i) {
                                 if *c == 0.0 {
                                     touched.push(i);
                                 }
-                                *c = c.max(m);
+                                if m > *c {
+                                    *c = m;
+                                    if let Some(sh) = shade.get_mut(i) {
+                                        *sh = b;
+                                    }
+                                }
                             }
                         }
                     }
@@ -382,9 +437,12 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
             for &i in &touched {
                 let a = p.opacity * cover[i];
                 cover[i] = 0.0;
+                // Each bristle also nudges lightness, up to ±6% at full depth.
+                let tint = (shade[i] - 0.5) * 0.12 * p.bristles;
+                shade[i] = 0.5;
                 for buf_px in [&mut layer[i], &mut canvas.px[i]] {
                     for c in 0..3 {
-                        buf_px[c] = colour[c] * a + buf_px[c] * (1.0 - a);
+                        buf_px[c] = (colour[c] + tint).clamp(0.0, 1.0) * a + buf_px[c] * (1.0 - a);
                     }
                     buf_px[3] = a + buf_px[3] * (1.0 - a);
                 }
@@ -513,6 +571,7 @@ mod tests {
             min_steps: 0,
             max_steps: u32::MAX,
             jitter: f32::NAN,
+            bristles: f32::NAN,
             clip: f32::NAN,
             seed: 0,
         };
@@ -591,5 +650,27 @@ mod tests {
         // One-pixel-wide pictures have no room for a gradient but must not panic.
         assert!(paint(&[[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]], 1, 2, &p).is_ok());
         assert!(paint(&[[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]], 2, 1, &p).is_ok());
+    }
+
+    #[test]
+    fn bristles_streak_the_paint_and_zero_depth_changes_nothing() {
+        // One cell, so a single stroke: overlapping strokes would saturate the layer's opacity.
+        let (w, h) = (40, 40);
+        let src = vec![[0.6, 0.4, 0.3, 1.0]; w * h];
+        let base = Params { radii: vec![10.0], jitter: 0.0, grid: 4.0, straightness: 1.0, min_steps: 6, max_steps: 6, ..Params::default() };
+        let smooth = paint(&src, w, h, &base).unwrap();
+        assert_eq!(smooth, paint(&src, w, h, &Params { bristles: 0.0, ..base.clone() }).unwrap());
+        let rough = paint(&src, w, h, &Params { bristles: 1.0, ..base.clone() }).unwrap();
+        // Inside the smooth stroke every pixel is fully painted; texture must thin some of them.
+        let inside: Vec<usize> = (0..w * h).filter(|&i| smooth[0].px[i][3] > 0.99).collect();
+        assert!(inside.len() > 100);
+        let alphas: Vec<f32> = inside.iter().map(|&i| rough[0].px[i][3]).collect();
+        let mean = alphas.iter().sum::<f32>() / alphas.len() as f32;
+        let sd = (alphas.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / alphas.len() as f32).sqrt();
+        assert!(sd > 0.04, "streaks vary the opacity: sd {sd}");
+        assert!(alphas.iter().all(|a| *a >= 0.45), "bristles never thin the paint past half: {:?}", alphas.iter().cloned().fold(1.0, f32::min));
+        assert!(rough[0].px.iter().all(|q| q.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))));
+        assert!(rough[0].px.iter().filter(|q| q[3] > 0.45).count() > 100, "texture still lays paint");
+        assert_eq!(rough, paint(&src, w, h, &Params { bristles: 1.0, ..base }).unwrap(), "deterministic");
     }
 }

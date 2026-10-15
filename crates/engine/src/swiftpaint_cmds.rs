@@ -74,6 +74,9 @@ fn swift_paint(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(v) = number(p, "jitter", 0.0, 100.0)? {
         params.jitter = v as f32 / 100.0;
     }
+    if let Some(v) = number(p, "bristles", 0.0, 100.0)? {
+        params.bristles = v as f32 / 100.0;
+    }
     if let Some(v) = number(p, "edgeClip", 0.0, 100.0)? {
         params.clip = v as f32 / 100.0;
     }
@@ -123,7 +126,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Swift Paint",
         menu: &["Filter", "Stylize"],
         shortcut: None,
-        params: r##"{"preset":"impressionist|oil|pointillist|wash"="impressionist","brushSize":0.1..10 (% of the longest side, biggest brush),"passes":1..6 (brush sizes, each half the last),"opacity":5..100,"strokeLength":1..200 (steps),"straightness":0..100,"jitter":0..100 (colour variation),"edgeClip":0..100 (strokes stop at edges of the picture; default from the preset, 0 = off),"detail":0..100,"seed":integer,"sourceLayer":layer id (default: the whole picture)} → {layer (the new group), passes, strokes}. One layer per brush size inside a "Swift Paint" group."##,
+        params: r##"{"preset":"impressionist|oil|pointillist|wash"="impressionist","brushSize":0.1..10 (% of the longest side, biggest brush),"passes":1..6 (brush sizes, each half the last),"opacity":5..100,"strokeLength":1..200 (steps),"straightness":0..100,"jitter":0..100 (colour variation),"bristles":0..100 (bristle streaks in each stroke; default from the preset, 0 = smooth),"edgeClip":0..100 (strokes stop at edges of the picture; default from the preset, 0 = off),"detail":0..100,"seed":integer,"sourceLayer":layer id (default: the whole picture)} → {layer (the new group), passes, strokes}. One layer per brush size inside a "Swift Paint" group."##,
         enabled: has_doc,
         run: swift_paint,
         journal: true,
@@ -189,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn edge_clipping_is_accepted_at_both_ends() {
+    fn edge_clipping_and_bristles_are_accepted_at_both_ends() {
         let mut s = session(8);
-        for clip in [0, 100] {
-            let out = s.execute(CMD, json!({"edgeClip": clip})).unwrap();
-            assert!(out["strokes"].as_u64().unwrap() > 0, "clip {clip}");
+        for v in [0, 100] {
+            let out = s.execute(CMD, json!({"edgeClip": v, "bristles": v})).unwrap();
+            assert!(out["strokes"].as_u64().unwrap() > 0, "value {v}");
         }
     }
 
@@ -210,6 +213,9 @@ mod tests {
             json!({"opacity": "x"}),
             json!({"strokeLength": 1e9}),
             json!({"detail": -1}),
+            json!({"bristles": -1}),
+            json!({"bristles": 101}),
+            json!({"bristles": "x"}),
             json!({"edgeClip": -1}),
             json!({"edgeClip": 101}),
             json!({"edgeClip": "x"}),

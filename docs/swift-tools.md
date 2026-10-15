@@ -47,6 +47,11 @@ sample the active picture only, not the reference.
 "Swift Paint (preset)" group, so any pass can be masked or faded. Presets: impressionist, oil,
 pointillist, wash. Each press uses a new seed.
 
+**Bristle texture** (`bristles`, 0–100, preset defaults 0–60): each stroke has fixed bristles across
+its width; a pixel's bristle comes from its distance to the side of the stroke's path, so the streaks run
+along the stroke and bend with it. Bristles thin the paint (never below half) and shift lightness by up to
+±6%. 0 gives exactly the smooth strokes.
+
 **Edge clipping** (`edgeClip`, 0–100, preset defaults 25–60): a stroke stops where its path would run into a
 strong edge of the picture, and the brush never paints across one, so paint stays inside shapes.
 Edges are the gradient of the lightly blurred luminance; higher values count fainter edges. With

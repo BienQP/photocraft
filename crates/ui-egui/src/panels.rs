@@ -6424,6 +6424,9 @@ fn swift_paint_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         // Edge clipping %: strokes stop at edges of the picture (kept apart from the tuple above).
         let clip_key = egui::Id::new("swift-paint-clip");
         let mut clip: f32 = ui.data(|d| d.get_temp(clip_key)).unwrap_or(50.0);
+        // Bristle texture %.
+        let bristles_key = egui::Id::new("swift-paint-bristles");
+        let mut bristles: f32 = ui.data(|d| d.get_temp(bristles_key)).unwrap_or(40.0);
         // (preset, customise, brush size %, passes, detail %, opacity %, seed)
         let (mut preset, mut custom, mut size, mut passes, mut detail, mut opacity, mut seed): (usize, bool, f32, f32, f32, f32, u32) =
             ui.data(|d| d.get_temp(key)).unwrap_or((0, false, 1.2, 3.0, 50.0, 100.0, 1));
@@ -6441,6 +6444,7 @@ fn swift_paint_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             crate::widgets::slider_row(ui, "Passes", &mut passes, 1.0..=5.0, "", None);
             crate::widgets::slider_row(ui, "Detail", &mut detail, 0.0..=100.0, "%", None);
             crate::widgets::slider_row(ui, "Edge clip", &mut clip, 0.0..=100.0, "%", None);
+            crate::widgets::slider_row(ui, "Bristles", &mut bristles, 0.0..=100.0, "%", None);
             crate::widgets::slider_row(ui, "Opacity", &mut opacity, 5.0..=100.0, "%", None);
         }
         let paint = ui.button("Paint").on_hover_text("Adds a Swift Paint group: one layer per brush size, so you can mask or fade any pass").clicked();
@@ -6452,6 +6456,7 @@ fn swift_paint_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 params["detail"] = json!(detail);
                 params["opacity"] = json!(opacity);
                 params["edgeClip"] = json!(clip);
+                params["bristles"] = json!(bristles);
             }
             let _ = app.run("layer.swiftPaint", params);
             seed = seed.wrapping_add(1);
@@ -6459,6 +6464,7 @@ fn swift_paint_section(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.data_mut(|d| {
             d.insert_temp(key, (preset, custom, size, passes, detail, opacity, seed));
             d.insert_temp(clip_key, clip);
+            d.insert_temp(bristles_key, bristles);
         });
     });
 }
