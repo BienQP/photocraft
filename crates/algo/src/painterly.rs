@@ -495,6 +495,18 @@ impl Canvas {
 /// Paints `src` (straight RGBA, `w × h`, alpha ignored: the picture is treated as opaque) in one
 /// pass per brush size.
 pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Vec<Pass>, String> {
+    let mut passes = Vec::new();
+    paint_each(src, w, h, params, &mut |pass| {
+        passes.push(pass);
+        Ok(())
+    })?;
+    Ok(passes)
+}
+
+/// Like [`paint`], but hands each pass to `on_pass` the moment it is finished (largest brush
+/// first) instead of keeping them all, so a caller that converts each into a layer never holds
+/// more than one at a time. An error from `on_pass` stops the painting and is returned.
+pub fn paint_each(src: &[[f32; 4]], w: usize, h: usize, params: &Params, on_pass: &mut dyn FnMut(Pass) -> Result<(), String>) -> Result<(), String> {
     let n = w.checked_mul(h).ok_or("the picture is too large")?;
     if w == 0 || h == 0 {
         return Err("the picture has no area".into());
@@ -508,11 +520,10 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
     let p = params.sanitized();
     let mut rng = Rng::new(p.seed);
     let mut canvas = Canvas { w, px: vec![[0.0; 4]; n] };
-    let mut passes = Vec::with_capacity(p.radii.len());
     let channels: [Vec<f32>; 3] = std::array::from_fn(|c| src.iter().map(|q| if q[c].is_finite() { q[c].clamp(0.0, 1.0) } else { 0.0 }).collect());
     let edges = Edges::build(&channels, w, h, p.clip);
 
-    for &radius in &p.radii {
+    for (pass_no, &radius) in p.radii.iter().enumerate() {
         let sigma = (p.blur * radius).min(40.0);
         let blurred: Vec<Vec<f32>> = channels.iter().map(|c| fast_blur(c, w, h, sigma)).collect();
         let refc = |x: usize, y: usize| -> [f32; 3] {
@@ -563,7 +574,7 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
         let per_width = (radius * 0.8).clamp(3.0, 14.0);
         let reach = radius.ceil() as i64 + 1;
         let (r_out, r_in) = (radius + 0.5, (radius - 0.5).max(0.0));
-        let pass_key = (passes.len() as u64) << 40;
+        let pass_key = (pass_no as u64) << 40;
 
         // Strokes are laid in batches. Every stroke of a batch follows the picture against the
         // canvas as the batch began (seeds are shuffled, so neighbours rarely share a batch), which
@@ -660,13 +671,16 @@ pub fn paint(src: &[[f32; 4]], w: usize, h: usize, params: &Params) -> Result<Ve
                 from = to;
             }
         }
-        let px: Vec<[f32; 4]> = layer
-            .iter()
-            .map(|q| if q[3] > 1e-6 { [(q[0] / q[3]).clamp(0.0, 1.0), (q[1] / q[3]).clamp(0.0, 1.0), (q[2] / q[3]).clamp(0.0, 1.0), q[3].clamp(0.0, 1.0)] } else { [0.0; 4] })
-            .collect();
-        passes.push(Pass { radius, strokes: seeds.len(), px });
+        // The blurred picture isn't needed past the strokes; free it before the output is made.
+        drop((blurred, lum));
+        // Premultiplied to straight alpha, in place.
+        let mut px = layer;
+        for q in px.iter_mut() {
+            *q = if q[3] > 1e-6 { [(q[0] / q[3]).clamp(0.0, 1.0), (q[1] / q[3]).clamp(0.0, 1.0), (q[2] / q[3]).clamp(0.0, 1.0), q[3].clamp(0.0, 1.0)] } else { [0.0; 4] };
+        }
+        on_pass(Pass { radius, strokes: seeds.len(), px })?;
     }
-    Ok(passes)
+    Ok(())
 }
 
 /// The passes stacked over each other (what the layers add up to), as opaque-or-not straight RGBA.
@@ -914,9 +928,29 @@ mod tests {
             })
             .collect();
         let params = preset(&name, w.max(h)).unwrap();
+        // Peak resident memory so far, in MB (Linux; 0 elsewhere).
+        let peak_mb = || {
+            std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())).map_or(0.0, |kb| kb / 1024.0)
+        };
+        let before = peak_mb();
         let t = std::time::Instant::now();
-        let passes = paint(&src, w, h, &params).unwrap();
-        eprintln!("{name} {w}x{h} ({:.1} MP): {:.2} s, strokes per pass {:?}", (w * h) as f64 / 1e6, t.elapsed().as_secs_f64(), passes.iter().map(|p| p.strokes).collect::<Vec<_>>());
+        // Like the engine: each pass becomes a stored 4-float layer at once, then is dropped.
+        let mut kept: Vec<Vec<f32>> = Vec::new();
+        let mut strokes = Vec::new();
+        paint_each(&src, w, h, &params, &mut |pass| {
+            strokes.push(pass.strokes);
+            kept.push(pass.px.iter().flatten().copied().collect());
+            Ok(())
+        })
+        .unwrap();
+        eprintln!(
+            "{name} {w}x{h} ({:.1} MP): {:.2} s, strokes per pass {:?}; peak memory {:.0} MB (picture alone {:.0} MB)",
+            (w * h) as f64 / 1e6,
+            t.elapsed().as_secs_f64(),
+            strokes,
+            peak_mb(),
+            before
+        );
     }
 }
 

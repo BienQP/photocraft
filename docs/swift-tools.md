@@ -70,8 +70,10 @@ live in panel UI state, not in presets or `.abr` files, and are lost when a grou
 
 ## Known limits
 
-- Swift Paint timing (oil preset, 12 MP, release, 2-core sandbox): 30 s before optimising, 6.3 s now
-  (8.6 s on one core). It scales with cores; 24–36 MP and many-core machines are not measured yet.
-  Run `PAINT_MP=12 cargo test -p photocraft-algo --release --lib painterly::tests::bench -- --ignored --nocapture`.
+- Swift Paint timing and memory (oil preset, release, 2-core 8 GB sandbox): 12 MP 6.3–7 s, 1.2 GB peak;
+  24 MP 14 s, 2.5 GB; 36 MP 22 s, 3.8 GB (about 90 bytes per pixel, mostly the working set of the
+  largest pass: canvas, channels, blurred copy, stroke layer). Each finished pass is turned into a
+  layer straight away, so passes are never held twice. Time scales with cores; many-core machines are
+  not measured yet. Run `PAINT_MP=12 cargo test -p photocraft-algo --release --lib painterly::tests::bench -- --ignored --nocapture`.
 - Not verified on wasm in the build sandbox (`cargo xtask wasm` needs the target installed).
 - Preview styles are original, not copies of any plug-in's.

@@ -97,21 +97,31 @@ fn swift_paint(s: &mut Session, p: &Value) -> Result<Value> {
             photocraft_compose::render_layer(layer, bounds).over_background([1.0, 1.0, 1.0]).px
         }
     };
-    let passes = painterly::paint(&src, w, h, &params).map_err(bad)?;
+    let fmt = d.doc.pixel_format();
+    let doc_bounds = d.doc.bounds();
+    // Each finished pass becomes a layer at once, so only one pass's pixels exist at a time.
+    let mut children = Vec::new();
+    let mut strokes = 0usize;
+    let mut index = 0usize;
+    painterly::paint_each(&src, w, h, &params, &mut |pass| {
+        index += 1;
+        strokes += pass.strokes;
+        if pass.strokes == 0 {
+            return Ok(());
+        }
+        let mut l = Layer::raster(format!("Pass {} · brush {:.0} px", index, pass.radius), fmt);
+        let data: Vec<f32> = pass.px.iter().flat_map(|q| photocraft_raster::from_rgba(&fmt, *q)).collect();
+        drop(pass);
+        crate::pixels_mut(&mut l).map_err(|e| e.to_string())?.write_region(doc_bounds, &data);
+        children.push(l);
+        Ok(())
+    })
+    .map_err(bad)?;
     drop(src);
 
     let name = format!("Swift Paint ({preset})");
-    let strokes: usize = passes.iter().map(|q| q.strokes).sum();
-    let count = passes.iter().filter(|q| q.strokes > 0).count();
+    let count = children.len();
     let id = s.edit("Swift Paint", |doc, active| {
-        let fmt = doc.pixel_format();
-        let mut children = Vec::new();
-        for (i, pass) in passes.iter().enumerate().filter(|(_, q)| q.strokes > 0) {
-            let mut l = Layer::raster(format!("Pass {} · brush {:.0} px", i + 1, pass.radius), fmt);
-            let data: Vec<f32> = pass.px.iter().flat_map(|q| photocraft_raster::from_rgba(&fmt, *q)).collect();
-            crate::pixels_mut(&mut l)?.write_region(doc.bounds(), &data);
-            children.push(l);
-        }
         let group = Layer::group(doc.next_layer_name(&name), children);
         let id = doc.insert_above(*active, group);
         *active = Some(id);
