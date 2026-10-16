@@ -47,6 +47,11 @@ sample the active picture only, not the reference.
 "Swift Paint (preset)" group, so any pass can be masked or faded. Presets: impressionist, oil,
 pointillist, wash. Each press uses a new seed.
 
+**Speed.** The blur is three parallel box blurs (cost independent of brush size). Strokes are laid in
+batches of 48: each is planned against the canvas as the batch began, painted in parallel into its own
+tile (each step paints only the crescent it adds), then composited in stroke order in row bands, so the
+result is the same on any number of threads.
+
 **Bristle texture** (`bristles`, 0–100, preset defaults 0–60): each stroke has fixed bristles across
 its width; a pixel's bristle comes from its distance to the side of the stroke's path, so the streaks run
 along the stroke and bend with it. Bristles thin the paint (never below half) and shift lightness by up to
@@ -65,7 +70,8 @@ live in panel UI state, not in presets or `.abr` files, and are lost when a grou
 
 ## Known limits
 
-- Swift Paint is sequential and has not been timed on 24–36 MP images in release (edge clipping adds
-  an edge map and a line-of-sight check per stamped pixel near edges; not yet measured).
+- Swift Paint timing (oil preset, 12 MP, release, 2-core sandbox): 30 s before optimising, 6.3 s now
+  (8.6 s on one core). It scales with cores; 24–36 MP and many-core machines are not measured yet.
+  Run `PAINT_MP=12 cargo test -p photocraft-algo --release --lib painterly::tests::bench -- --ignored --nocapture`.
 - Not verified on wasm in the build sandbox (`cargo xtask wasm` needs the target installed).
 - Preview styles are original, not copies of any plug-in's.
