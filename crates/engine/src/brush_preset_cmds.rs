@@ -125,6 +125,21 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "name": new }))
 }
 
+fn set_tags(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "brush.presets.setTags";
+    let i = find(s, p, "name", cmd)?;
+    let err = || bad(cmd, format!("`tags` must be a list of at most {} words", photocraft_paint::MAX_TAGS));
+    let raw = p.get("tags").and_then(Value::as_array).filter(|a| a.len() <= photocraft_paint::MAX_TAGS * 4).ok_or_else(err)?;
+    let words: Vec<&str> = raw.iter().map(|v| v.as_str().ok_or_else(err)).collect::<Result<_>>()?;
+    let tags = photocraft_paint::clean_tags(words);
+    let pr = s.tools.presets.get_mut(i).ok_or_else(|| bad(cmd, "no such preset"))?;
+    if pr.tags != tags {
+        pr.tags = tags.clone();
+        s.brush_presets_changed();
+    }
+    Ok(json!({ "name": s.tools.presets[i].name, "tags": tags }))
+}
+
 fn move_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "brush.presets.move";
     let i = find(s, p, "name", cmd)?;
@@ -447,6 +462,12 @@ macro_rules! spec {
 /// Brush preset organisation specs.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        spec!(
+            "brush.presets.setTags",
+            "Tag Brush",
+            r##"{"name":string,"tags":[string] (at most 16 words; cleaned to lower-case, no spaces or leading #; replaces the preset's tags)} → {name, tags}"##,
+            set_tags
+        ),
         spec!("brush.presets.rename", "Rename Brush", r##"{"name":string,"newName":string} → {name}"##, rename),
         spec!(
             "brush.presets.move",
@@ -486,7 +507,7 @@ mod tests {
     fn with_groups() -> Session {
         let mut s = Session::new();
         for (n, g) in [("A1", "Alpha"), ("A2", "Alpha"), ("A3", "Alpha"), ("B1", "Beta"), ("B2", "Beta")] {
-            s.tools.presets.push(BrushPreset {
+            s.tools.presets.push(BrushPreset { tags: Vec::new(),
                 name: n.into(),
                 brush: Default::default(),
                 builtin: false,
@@ -548,6 +569,30 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_cleaned_survive_renames_and_round_trip() {
+        let mut s = with_groups();
+        let out = s.execute("brush.presets.setTags", json!({"name": "a1", "tags": ["#Wet", "dry paint", "wet", "  ", 5.to_string()]})).unwrap();
+        assert_eq!(out["tags"], json!(["5", "dry-paint", "wet"]));
+        s.execute("brush.presets.rename", json!({"name": "A1", "newName": "Alpha One"})).unwrap();
+        let p = photocraft_paint::presets::find(&s.tools.presets, "Alpha One").unwrap();
+        assert_eq!(p.tags, ["5", "dry-paint", "wet"]);
+        let back: BrushPreset = serde_json::from_value(serde_json::to_value(p).unwrap()).unwrap();
+        assert_eq!(&back, p);
+        // An older preset without the field loads untagged.
+        let mut v = serde_json::to_value(p).unwrap();
+        v.as_object_mut().unwrap().remove("tags");
+        assert!(serde_json::from_value::<BrushPreset>(v).unwrap().tags.is_empty());
+        let many: Vec<String> = (0..40).map(|i| format!("t{i:02}")).collect();
+        let out = s.execute("brush.presets.setTags", json!({"name": "Alpha One", "tags": many})).unwrap();
+        assert_eq!(out["tags"].as_array().unwrap().len(), photocraft_paint::MAX_TAGS);
+        s.execute("brush.presets.setTags", json!({"name": "Alpha One", "tags": []})).unwrap();
+        assert!(photocraft_paint::presets::find(&s.tools.presets, "Alpha One").unwrap().tags.is_empty());
+        for bad in [json!({"name": "A1"}), json!({"name": "Alpha One", "tags": "wet"}), json!({"name": "Alpha One", "tags": [1]}), json!({"name": "nope", "tags": []})] {
+            assert!(s.execute("brush.presets.setTags", bad).is_err());
+        }
+    }
+
+    #[test]
     fn rename_checks_names() {
         let mut s = with_groups();
         s.execute("brush.presets.rename", json!({"name": "a1", "newName": "Alpha One"})).unwrap();
@@ -598,7 +643,7 @@ mod tests {
         let mut s = Session::new();
         for (n, f) in [("S0", &[][..]), ("I1", &["Ink"][..]), ("F1", &["Ink", "Fine"][..]), ("I2", &["Ink"][..]), ("D1", &["Dry"][..])] {
             let folder = f.iter().map(|x| x.to_string()).collect();
-            s.tools.presets.push(BrushPreset {
+            s.tools.presets.push(BrushPreset { tags: Vec::new(),
                 name: n.into(),
                 brush: Default::default(),
                 builtin: false,
@@ -705,7 +750,7 @@ mod tests {
         let mut s = with_folders();
         for (n, f) in [("O1", &[][..]), ("B1", &["Box"][..])] {
             let folder = f.iter().map(|x| x.to_string()).collect();
-            s.tools.presets.push(BrushPreset {
+            s.tools.presets.push(BrushPreset { tags: Vec::new(),
                 name: n.into(),
                 brush: Default::default(),
                 builtin: false,
@@ -745,7 +790,7 @@ mod tests {
         let mut s = with_two_groups();
         // A chain 31 deep under Set/Deep.
         let deep: Vec<String> = std::iter::once("Deep".to_string()).chain((0..30).map(|i| format!("d{i}"))).collect();
-        s.tools.presets.push(BrushPreset {
+        s.tools.presets.push(BrushPreset { tags: Vec::new(),
             name: "Z".into(),
             brush: Default::default(),
             builtin: false,
@@ -753,7 +798,7 @@ mod tests {
             folder: deep.clone(),
             captures: Default::default(),
         });
-        s.tools.presets.push(BrushPreset {
+        s.tools.presets.push(BrushPreset { tags: Vec::new(),
             name: "Y".into(),
             brush: Default::default(),
             builtin: false,
@@ -793,7 +838,7 @@ mod tests {
         s.execute("brush.presets.moveGroup", json!({"group": "Set", "folder": ["Ink", "Fine"], "into": {"group": "Set"}})).unwrap();
         assert_eq!(folder_of(&s, "F1"), ["Fine"]);
         // An ungrouped preset's group can't move.
-        s.tools.presets.push(BrushPreset {
+        s.tools.presets.push(BrushPreset { tags: Vec::new(),
             name: "U".into(),
             brush: Default::default(),
             builtin: false,

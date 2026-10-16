@@ -672,7 +672,7 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
                             hashes.push(i.preview.clone());
                         }
                     }
-                    items.push(BrushPreset {
+                    items.push(BrushPreset { tags: Vec::new(),
                         name: sp.name,
                         brush,
                         builtin: false,

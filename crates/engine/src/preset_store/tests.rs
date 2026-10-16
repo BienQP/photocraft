@@ -45,7 +45,7 @@ fn tip16(w: u32, h: u32, seed: u32) -> GrayTile {
 
 fn sampled(name: &str, group: &str, tip: GrayTile) -> BrushPreset {
     let brush = BrushSettings { size: 42.0, spacing: 0.1, tip: TipShape::Sampled(tip), ..Default::default() };
-    BrushPreset { name: name.into(), brush, builtin: false, group: group.into(), folder: Vec::new(), captures: Default::default() }
+    BrushPreset { tags: Vec::new(), name: name.into(), brush, builtin: false, group: group.into(), folder: Vec::new(), captures: Default::default() }
 }
 
 fn user(s: &Session) -> Vec<BrushPreset> {

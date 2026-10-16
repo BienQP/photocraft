@@ -65,8 +65,14 @@ an edge keep their own side's colour.
 
 ## Swift Brush
 
-Quick controls, brush-group colours and tags, and four stroke-preview styles. Tags and colours
-live in panel UI state, not in presets or `.abr` files, and are lost when a group is renamed.
+Quick controls, brush-group colours and tags, and four stroke-preview styles.
+
+Tags are stored on the preset itself (`BrushPreset.tags`), so they follow it through renames and
+moves and are saved with the session and the preset store. Set them from the preset's right-click
+menu or with `brush.presets.setTags {name, tags}` (lower-case, no spaces, at most 16 of 24
+characters). Filter with `#tag` in the search box. Tags are not written to `.abr` files (that format
+has nowhere to keep them). Group colours are still panel view state and are lost when a group is
+renamed.
 
 ## Known limits
 

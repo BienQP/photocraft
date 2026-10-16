@@ -479,7 +479,7 @@ fn drop_targets_and_actions_reorder_presets() {
     use crate::brushes_tab::{Action, apply, drop_target, group_key};
     let mut app = app();
     for (n, g) in [("A1", "Alpha"), ("A2", "Alpha"), ("A3", "Alpha"), ("B1", "Beta")] {
-        app.session.tools.presets.push(paint::BrushPreset {
+        app.session.tools.presets.push(paint::BrushPreset { tags: Vec::new(),
             name: n.into(),
             brush: Default::default(),
             builtin: false,
@@ -780,7 +780,7 @@ fn swift_brush_tag_chips_filter_the_list() {
     let mut h = harness(1, 0);
     assert!(h.state().session.tools.presets.iter().any(|p| p.name == "Soft Round") && h.state().session.tools.presets.iter().any(|p| p.name == "Hard Round"));
     assert!(h.query_by_label("#wet").is_none(), "no tags, no chips");
-    h.state_mut().ui.brushes_panel.swift.set_tag("Soft Round", "wet", true);
+    h.state_mut().run("brush.presets.setTags", json!({"name": "Soft Round", "tags": ["wet"]})).unwrap();
     h.run_steps(3);
     assert!(h.query_by_label("Hard Round").is_some());
     h.get_by_label("#wet").click();
@@ -795,7 +795,6 @@ fn swift_brush_tag_chips_filter_the_list() {
     // Tags of a deleted preset are forgotten.
     h.state_mut().run("brush.presets.delete", json!({"name": "Soft Round"})).unwrap();
     h.run_steps(3);
-    assert!(h.state().ui.brushes_panel.swift.tags.is_empty());
     assert!(h.query_by_label("#wet").is_none());
 }
 
@@ -803,16 +802,15 @@ fn swift_brush_tag_chips_filter_the_list() {
 #[test]
 fn swift_brush_state_serialises_and_old_state_loads() {
     let mut st = BrushesPanelState::default();
-    st.swift.set_tag("Chalk", "dry", true);
     st.swift.set_color("General", Some([1, 2, 3]));
     let back: BrushesPanelState = serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
     assert_eq!(back, st);
     let old: BrushesPanelState = serde_json::from_value(json!({"filter": "x"})).unwrap();
-    assert!(old.swift.tags.is_empty() && old.swift.group_colors.is_empty());
+    assert!(old.swift.group_colors.is_empty());
 }
 
 fn kit(name: &str, folder: &[&str]) -> paint::BrushPreset {
-    paint::BrushPreset {
+    paint::BrushPreset { tags: Vec::new(),
         name: name.into(),
         brush: Default::default(),
         builtin: false,

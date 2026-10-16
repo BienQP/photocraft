@@ -770,7 +770,7 @@ fn presets_save(s: &mut Session, p: &Value) -> Result<Value> {
     if captures.color {
         brush.color = s.tools.foreground;
     }
-    upsert(s, BrushPreset { name: name.clone(), brush, builtin: false, group: String::new(), folder: Vec::new(), captures });
+    upsert(s, BrushPreset { tags: Vec::new(), name: name.clone(), brush, builtin: false, group: String::new(), folder: Vec::new(), captures });
     // The saved brush is the current brush now (Photoshop selects the brush it just saved).
     s.tools.current_preset = Some(name.clone());
     Ok(json!({ "name": name, "count": s.tools.presets.len() }))
@@ -886,7 +886,7 @@ fn define_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let tip = GrayTile::from_f32(tw, th, &data);
     let brush = BrushSettings { tip: TipShape::Sampled(tip), size: tw.max(th) as f32, spacing: 0.25, pressure_size: false, ..BrushSettings::default() };
-    upsert(s, BrushPreset { name: name.clone(), brush: brush.clone(), builtin: false, group: String::new(), folder: Vec::new(), captures: Default::default() });
+    upsert(s, BrushPreset { tags: Vec::new(), name: name.clone(), brush: brush.clone(), builtin: false, group: String::new(), folder: Vec::new(), captures: Default::default() });
     s.tools.brush = brush;
     s.tools.current_preset = Some(name.clone());
     Ok(json!({ "name": name, "width": tw, "height": th }))

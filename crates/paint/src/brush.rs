@@ -678,6 +678,30 @@ pub struct BrushPreset {
     /// dialog's boxes.
     #[serde(default, skip_serializing_if = "PresetCaptures::is_default")]
     pub captures: PresetCaptures,
+    /// Swift Brush tags (lower-case words, see [`clean_tag`]) for finding the preset; they travel
+    /// with it through renames, moves and saved sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Most tags per preset and longest tag, so hostile files or scripts can't bloat a session.
+pub const MAX_TAGS: usize = 16;
+pub const MAX_TAG_LEN: usize = 24;
+
+/// A tag as stored: trimmed, no leading `#`, no whitespace inside, lower-case, bounded.
+pub fn clean_tag(raw: &str) -> Option<String> {
+    let t: String = raw.trim().trim_start_matches('#').split_whitespace().collect::<Vec<_>>().join("-").to_lowercase();
+    let t: String = t.chars().take(MAX_TAG_LEN).collect();
+    (!t.is_empty()).then_some(t)
+}
+
+/// `raw` cleaned, de-duplicated, sorted and cut to [`MAX_TAGS`].
+pub fn clean_tags<'a>(raw: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut v: Vec<String> = raw.into_iter().filter_map(clean_tag).collect();
+    v.sort();
+    v.dedup();
+    v.truncate(MAX_TAGS);
+    v
 }
 
 /// The New Brush Preset dialog's boxes, kept with the preset. The default is a preset made

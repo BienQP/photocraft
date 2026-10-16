@@ -1,6 +1,7 @@
-//! Swift Brush organising data: colour-coded groups and tags on brush presets, kept in the
-//! Brushes panel's view state (so it serialises with the UI and the control channel can read and
-//! drive it). Clean-room: group colours and tag filtering are the common ideas of brush
+//! Swift Brush organising data: colour-coded groups (kept in the Brushes panel's view state, so
+//! it serialises with the UI and the control channel can read and drive it) and the tag helpers.
+//! Tags themselves live on the presets ([`photocraft_paint::BrushPreset::tags`]), so they follow
+//! renames and are saved with the session. Clean-room: group colours and tag filtering are the common ideas of brush
 //! organisers; nothing here comes from any plug-in.
 //!
 //! Filter syntax: words are ANDed; a word starting with `#` matches a tag (prefix,
@@ -20,24 +21,13 @@ pub const PALETTE: [(&str, [u8; 3]); 8] = [
     ("Pink", [214, 102, 160]),
 ];
 
-/// Most tags per preset and longest tag, so hostile files or scripts can't bloat the state.
-pub const MAX_TAGS: usize = 16;
-pub const MAX_TAG_LEN: usize = 24;
+pub use photocraft_paint::{MAX_TAG_LEN, MAX_TAGS, clean_tag};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SwiftBrush {
     /// Group key → colour.
     pub group_colors: Vec<(String, [u8; 3])>,
-    /// Preset name → its tags.
-    pub tags: Vec<(String, Vec<String>)>,
-}
-
-/// A tag as stored: trimmed, no leading `#`, no whitespace inside, lower-case, bounded.
-pub fn clean_tag(raw: &str) -> Option<String> {
-    let t: String = raw.trim().trim_start_matches('#').split_whitespace().collect::<Vec<_>>().join("-").to_lowercase();
-    let t: String = t.chars().take(MAX_TAG_LEN).collect();
-    (!t.is_empty()).then_some(t)
 }
 
 impl SwiftBrush {
@@ -52,52 +42,33 @@ impl SwiftBrush {
         }
     }
 
-    pub fn tags_of(&self, preset: &str) -> &[String] {
-        self.tags.iter().find(|(n, _)| n == preset).map_or(&[], |(_, t)| t.as_slice())
-    }
-
-    /// Adds (`on`) or removes `tag` on `preset`; false when nothing changed.
-    pub fn set_tag(&mut self, preset: &str, tag: &str, on: bool) -> bool {
-        let Some(tag) = clean_tag(tag) else { return false };
-        let i = self.tags.iter().position(|(n, _)| n == preset);
-        if on {
-            match i {
-                Some(i) => {
-                    let list = &mut self.tags[i].1;
-                    if list.contains(&tag) || list.len() >= MAX_TAGS {
-                        return false;
-                    }
-                    list.push(tag);
-                    list.sort();
-                }
-                None => self.tags.push((preset.to_string(), vec![tag])),
-            }
-            true
-        } else {
-            let Some(i) = i else { return false };
-            let before = self.tags[i].1.len();
-            self.tags[i].1.retain(|t| *t != tag);
-            let changed = self.tags[i].1.len() != before;
-            if self.tags[i].1.is_empty() {
-                self.tags.remove(i);
-            }
-            changed
-        }
-    }
-
-    /// Every tag in use, sorted, once each.
-    pub fn all_tags(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.tags.iter().flat_map(|(_, t)| t.iter().cloned()).collect();
+    /// Every tag in use on `presets`, sorted, once each.
+    pub fn all_tags(presets: &[photocraft_paint::BrushPreset]) -> Vec<String> {
+        let mut v: Vec<String> = presets.iter().flat_map(|p| p.tags.iter().cloned()).collect();
         v.sort();
         v.dedup();
         v
     }
 
-    /// Drops tags and colours of presets and groups that no longer exist.
-    pub fn retain_known(&mut self, presets: &[&str], groups: &[&str]) {
-        self.tags.retain(|(n, _)| presets.contains(&n.as_str()));
+    /// Drops colours of groups that no longer exist.
+    pub fn retain_known(&mut self, groups: &[&str]) {
         self.group_colors.retain(|(g, _)| groups.contains(&g.as_str()));
     }
+}
+
+/// `current` with `tag` added (`on`) or removed; `None` when nothing would change.
+pub fn toggled(current: &[String], tag: &str, on: bool) -> Option<Vec<String>> {
+    let tag = clean_tag(tag)?;
+    let has = current.contains(&tag);
+    if on == has || (on && current.len() >= MAX_TAGS) {
+        return None;
+    }
+    let mut v: Vec<String> = current.iter().filter(|t| **t != tag).cloned().collect();
+    if on {
+        v.push(tag);
+        v.sort();
+    }
+    Some(v)
 }
 
 /// Does a preset called `name` with `tags` pass `filter` (see the module docs)? An empty filter
@@ -130,25 +101,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tags_are_cleaned_added_removed_and_bounded() {
+    fn tags_are_cleaned_toggled_and_bounded() {
         assert_eq!(clean_tag("  #Ink Wash "), Some("ink-wash".into()));
         assert_eq!(clean_tag("###"), None);
         assert_eq!(clean_tag(""), None);
         assert_eq!(clean_tag(&"x".repeat(100)).map(|t| t.len()), Some(MAX_TAG_LEN));
-        let mut s = SwiftBrush::default();
-        assert!(s.set_tag("Chalk", "Dry", true));
-        assert!(!s.set_tag("Chalk", "dry", true), "no duplicates");
-        assert!(s.set_tag("Chalk", "texture", true));
-        assert_eq!(s.tags_of("Chalk"), ["dry", "texture"]);
-        assert!(s.set_tag("Chalk", "DRY", false));
-        assert!(!s.set_tag("Chalk", "dry", false), "already gone");
-        assert!(!s.set_tag("Nope", "x", false));
-        assert!(s.set_tag("Chalk", "texture", false));
-        assert!(s.tags.is_empty(), "an empty list is dropped");
-        for i in 0..40 {
-            s.set_tag("Many", &format!("t{i}"), true);
-        }
-        assert_eq!(s.tags_of("Many").len(), MAX_TAGS);
+        let mut tags: Vec<String> = Vec::new();
+        tags = toggled(&tags, "Dry", true).unwrap_or(tags);
+        assert_eq!(toggled(&tags, "dry", true), None, "no duplicates");
+        tags = toggled(&tags, "texture", true).unwrap();
+        assert_eq!(tags, ["dry", "texture"]);
+        tags = toggled(&tags, "DRY", false).unwrap();
+        assert_eq!(toggled(&tags, "dry", false), None, "already gone");
+        assert_eq!(toggled(&tags, "texture", false), Some(vec![]));
+        let full: Vec<String> = (0..MAX_TAGS).map(|i| format!("t{i:02}")).collect();
+        assert_eq!(toggled(&full, "one-more", true), None, "bounded");
     }
 
     #[test]
@@ -185,13 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn retain_known_prunes_the_gone() {
+    fn retain_known_prunes_gone_groups() {
         let mut s = SwiftBrush::default();
-        s.set_tag("Chalk", "a", true);
-        s.set_tag("Gone", "a", true);
         s.set_color("Inks", Some([1, 2, 3]));
         s.set_color("Old", Some([1, 2, 3]));
-        s.retain_known(&["Chalk"], &["Inks"]);
-        assert_eq!((s.tags.len(), s.group_colors.len()), (1, 1));
+        s.retain_known(&["Inks"]);
+        assert_eq!(s.group_colors.len(), 1);
     }
 }

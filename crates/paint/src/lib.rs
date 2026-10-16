@@ -33,7 +33,7 @@ pub mod symmetry;
 pub mod tile;
 
 pub use brush::{
-    BrushPreset, BrushSettings, ColorDynamics, Control, DualBrush, Dynamic, MAX_BRUSH_SIZE, MAX_SCATTER, MaskMode, Pattern, PatternStyle, Pose, PresetCaptures,
+    BrushPreset, BrushSettings, MAX_TAG_LEN, MAX_TAGS, clean_tag, clean_tags, ColorDynamics, Control, DualBrush, Dynamic, MAX_BRUSH_SIZE, MAX_SCATTER, MaskMode, Pattern, PatternStyle, Pose, PresetCaptures,
     Scattering, SectionLocks, ShapeDynamics, Smoothing, Texture, TipShape, Transfer,
 };
 pub use mixer::MixerSettings;
