@@ -146,7 +146,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             }
         }
         Adjustment::Levels { space, .. } | Adjustment::Curves { space, .. } => {
-            let luts = tone_luts_depth(adj, depth);
+            let luts = tone_luts_shared(adj, depth);
             let identity = float_tone_identity(adj, depth);
             match space {
                 ToneSpace::Rgb => map_rgb(buf, |c| std::array::from_fn(|i| if identity[i] { c[i] } else { lut(&luts[i], c[i]) })),
@@ -439,6 +439,30 @@ pub fn tone_luts_depth(adj: &Adjustment, depth: Option<SampleType>) -> [Vec<f32>
         }
         _ => tone_luts_q(adj, depth.and_then(crate::adjustment_quantum)),
     }
+}
+
+/// [`tone_luts_depth`] shared between the tiles one render splits into. A render applies the same
+/// adjustment once per 256-pixel tile, and the four 4096-entry tables cost about as much to build
+/// (1.6 ms) as applying them to the tile (1.7 ms); each worker thread keeps the last tables it
+/// built and reuses them while the adjustment and depth are equal (compared in full, so a changed
+/// slider can't read stale tables).
+fn tone_luts_shared(adj: &Adjustment, depth: Option<SampleType>) -> std::sync::Arc<[Vec<f32>; 4]> {
+    type Last = Option<(String, std::sync::Arc<[Vec<f32>; 4]>)>;
+    thread_local! {
+        static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
+    }
+    let key = format!("{depth:?}|{adj:?}");
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((k, luts)) = last.as_ref()
+            && *k == key
+        {
+            return luts.clone();
+        }
+        let luts = std::sync::Arc::new(tone_luts_depth(adj, depth));
+        *last = Some((key, luts.clone()));
+        luts
+    })
 }
 
 /// Applies channel LUTs to a display-RGB colour in CMYK (ink brightness, 1 - ink) or Lab space,
