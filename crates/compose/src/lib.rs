@@ -29,6 +29,7 @@ pub mod pattern;
 pub mod proxy;
 pub mod psblend;
 pub mod shape_split;
+pub mod stack_cache;
 
 use photocraft_color::blend::BlendMode;
 use photocraft_doc::{Document, Fill, Layer, LayerContent, Pattern};
@@ -85,7 +86,20 @@ pub const RENDER_TILE: i32 = 256;
 /// Composite the whole document over `rect`, in parallel 256² tiles on
 /// native targets (single-threaded on wasm).
 pub fn render(doc: &Document, rect: Rect) -> Buffer {
-    render_tiled(doc, rect, RENDER_TILE)
+    if stack_cache::enabled() { render_cached(doc, rect) } else { render_tiled(doc, rect, RENDER_TILE) }
+}
+
+/// [`render`] through the backdrop cache ([`stack_cache`]): tiles resume from the composite of the
+/// layers that haven't changed since the last render of this document.
+pub(crate) fn render_cached(doc: &Document, rect: Rect) -> Buffer {
+    let plan = stack_cache::plan(doc);
+    let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES).in_mode(doc.pixel_format().mode);
+    let cx = Ctx::for_doc(doc, &patterns);
+    let out = render_tiled_with(doc, rect, RENDER_TILE, &cx, plan.as_ref());
+    if let Some(p) = plan {
+        p.finish();
+    }
+    out
 }
 
 /// Most pixels one [`render`] call will produce (2^30, a 16 GiB buffer; 32768² px). Larger rects
@@ -97,10 +111,10 @@ pub const MAX_RENDER_PIXELS: u64 = 1 << 30;
 pub fn render_tiled(doc: &Document, rect: Rect, tile: i32) -> Buffer {
     let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES).in_mode(doc.pixel_format().mode);
     let cx = Ctx::for_doc(doc, &patterns);
-    render_tiled_with(doc, rect, tile, &cx)
+    render_tiled_with(doc, rect, tile, &cx, None)
 }
 
-fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer {
+fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx, plan: Option<&stack_cache::Plan>) -> Buffer {
     let tile = tile.max(1);
     // Lab documents mix Normal blending in CIELAB, as Photoshop does (psblend::LAB_MIX); 32-bit
     // documents don't clip Add / Divide or Hue / Saturation / Color / Luminosity at 1 (psblend::HDR).
@@ -118,23 +132,13 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
     }
     cx.set_fx_clip(rect);
     if i64::from(rect.width()) <= i64::from(tile) && i64::from(rect.height()) <= i64::from(tile) {
-        return photocraft_color::convert::with_cmyk_space(cmyk, || {
-            let mut buf = multichannel::backdrop(doc, rect);
-            in_blend_space(lab, hdr, || composite_stack_at(&doc.layers, &mut buf, cx, advanced::Scope::ROOT));
-            buf
-        });
+        return photocraft_color::convert::with_cmyk_space(cmyk, || composite_tile(doc, rect, cx, plan, lab, hdr));
     }
     // Effect maps are built once, here, before any tile needs them (#276).
     prepare_effects(&doc.layers, rect, cx, |f| {
         photocraft_color::convert::with_cmyk_space(cmyk, || in_blend_space(lab, hdr, f));
     });
-    let run = |t: Rect| {
-        photocraft_color::convert::with_cmyk_space(cmyk, || {
-            let mut b = multichannel::backdrop(doc, t);
-            in_blend_space(lab, hdr, || composite_stack_at(&doc.layers, &mut b, cx, advanced::Scope::ROOT));
-            b
-        })
-    };
+    let run = |t: Rect| photocraft_color::convert::with_cmyk_space(cmyk, || composite_tile(doc, t, cx, plan, lab, hdr));
     // Tiles are written straight into the output, one row of tiles (a band) at a time, so the
     // peak is the output plus the tiles in flight, not a second full-size copy.
     let w = rect.width() as usize;
@@ -191,6 +195,33 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
     out
 }
 
+/// The document's composite over tile `t`: the whole stack, or (with a [`stack_cache::Plan`]) the
+/// stack from the snapshot the last render of this tile left, snapshotting for the next one.
+fn composite_tile(doc: &Document, t: Rect, cx: &Ctx, plan: Option<&stack_cache::Plan>, lab: bool, hdr: bool) -> Buffer {
+    let snap = plan.and_then(|p| p.snapshot(t));
+    let (mut start, mut b) = match &snap {
+        Some((at, buf)) => (*at, Buffer::clone(buf)),
+        None => (0, multichannel::backdrop(doc, t)),
+    };
+    let mut capture = plan.and_then(|p| p.capture_at(start));
+    // A layer above `start` that hides everything beneath it over this tile: the layers below it
+    // can't show, so the loop starts there over an empty backdrop. (The same state follows from
+    // there on, so a snapshot taken above it is still the real backdrop.)
+    if plan.is_some()
+        && let Some(top) = stack_cache::occluder(&doc.layers, start, t)
+    {
+        stack_cache::note_occluded();
+        start = top;
+        b = Buffer::transparent(t);
+        capture = capture.filter(|&at| at > top);
+    }
+    in_blend_space(lab, hdr, || match (capture, plan) {
+        (Some(at), Some(p)) => composite_stack_from(&doc.layers, start, Some((at, &mut |bk: &Buffer| p.store(t, bk))), &mut b, cx, advanced::Scope::ROOT),
+        _ => composite_stack_from(&doc.layers, start, None, &mut b, cx, advanced::Scope::ROOT),
+    });
+    b
+}
+
 /// Runs `f` with this thread's document blend flags set ([`psblend::LAB_MIX`], [`psblend::HDR`]),
 /// then restores the values they had (also on unwind): a nested rayon job can run another tile
 /// on this thread mid-composite, and clearing the flags there broke the outer tile (#1112).
@@ -226,7 +257,7 @@ pub fn render_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink: imp
     let mut y = rect.y0;
     while y < rect.y1 {
         let y1 = y.saturating_add(rows).min(rect.y1);
-        sink(render_tiled_with(doc, Rect::new(rect.x0, y, rect.x1, y1), RENDER_TILE, &cx))?;
+        sink(render_tiled_with(doc, Rect::new(rect.x0, y, rect.x1, y1), RENDER_TILE, &cx, None))?;
         y = y1;
     }
     Ok(())
@@ -595,10 +626,27 @@ fn composite_stack(layers: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
 /// Composite a sibling list (bottom→top) onto `backdrop`; `scope` says where the stack sits (see
 /// [`advanced::Scope`]: it decides what knockouts reveal).
 fn composite_stack_at(layers: &[Layer], backdrop: &mut Buffer, cx: &Ctx, scope: advanced::Scope) {
+    composite_stack_from(layers, 0, None, backdrop, cx, scope);
+}
+
+/// A layer index and the callback that receives the backdrop when the loop reaches it.
+type Capture<'a> = (usize, &'a mut dyn FnMut(&Buffer));
+
+/// [`composite_stack_at`] starting at layer `start` (a clipping group's first layer) with
+/// `backdrop` holding the composite of the layers below it. `capture` hands the backdrop to its
+/// callback when the loop reaches the given layer (root stacks only: shallow knockouts need the
+/// stack's own floor, which a resumed loop doesn't have).
+fn composite_stack_from(layers: &[Layer], start: usize, mut capture: Option<Capture>, backdrop: &mut Buffer, cx: &Ctx, scope: advanced::Scope) {
+    debug_assert!(scope.root || (start == 0 && capture.is_none()));
     // Shallow knockouts stop at the bottom of this stack: the backdrop it starts from.
     let floor = (!scope.root && advanced::needs_floor(layers)).then(|| backdrop.clone());
-    let mut i = 0;
+    let mut i = start;
     while i < layers.len() {
+        if let Some((at, f)) = capture.as_mut()
+            && i == *at
+        {
+            f(backdrop);
+        }
         let base = &layers[i];
         // Collect the clipping group: following layers with `clipped = true`.
         let mut j = i + 1;
@@ -1776,6 +1824,8 @@ fn blend_into_g(backdrop: &mut Buffer, src: &Buffer, mode: BlendMode, opacity: f
     }
 }
 
+#[cfg(test)]
+mod stack_cache_tests;
 #[cfg(test)]
 mod stroke_tests;
 #[cfg(test)]

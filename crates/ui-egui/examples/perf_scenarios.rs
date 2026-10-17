@@ -4,7 +4,7 @@
 //! way the app creates it; the CPU compositor without an adapter).
 //!
 //! ```sh
-//! cargo run --release -p photocraft-ui-egui --example perf_scenarios -- [--quick] [--json out.json] [--only text] [--group layered] [--reps N] [--cpu] [--no-composite-reuse]
+//! cargo run --release -p photocraft-ui-egui --example perf_scenarios -- [--quick] [--stack-cache] [--json out.json] [--only text] [--group layered] [--reps N] [--cpu] [--no-composite-reuse]
 //! ```
 //!
 //! `cargo xtask perf` runs this and maps the rows to scenario ids in `perf/budgets.toml`, so
@@ -338,6 +338,9 @@ fn main() {
     let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(if quick { 7 } else { 15 }).max(1);
     let gpu = if args.iter().any(|a| a == "--cpu") { None } else { canvas() };
     let no_reuse = args.iter().any(|a| a == "--no-composite-reuse");
+    // CPU compositor only: resume tiles from the composite of the layers below the edited one.
+    let stack_cache = args.iter().any(|a| a == "--stack-cache");
+    photocraft_compose::stack_cache::set_enabled(stack_cache);
     if no_reuse && let Some((canvas, _)) = &gpu {
         canvas.set_composite_cache_budget(0);
     }
@@ -357,8 +360,9 @@ fn main() {
     // A panic in one group (a crash the scenario found) is reported against the row that was
     // running, and the other groups still run.
     type Group = fn(&mut Bench, &Sizes);
-    let groups: [(&str, Group); 5] = [
+    let groups: [(&str, Group); 6] = [
         ("layered", layered_scenarios),
+        ("photo stack", photo_stack_scenarios),
         ("many layers", many_layer_scenarios),
         ("bit depths", depth_scenarios),
         ("long operations", job_scenarios),
@@ -412,6 +416,49 @@ fn main() {
     }
 }
 
+/// Three full-canvas opaque photo layers under a styled panel, a headline and a Levels layer: what
+/// the composite can skip below the topmost opaque layer (`--stack-cache`).
+fn photo_stack_scenarios(b: &mut Bench, sz: &Sizes) {
+    let (w, h) = sz.layered;
+    let setup = || -> Res<(Session, u64, u64)> {
+        let mut s = Session::new();
+        exec(&mut s, "file.new", json!({"width": w, "height": h, "background": "white"}))?;
+        for i in 0..3u32 {
+            exec(&mut s, "layer.new.layer", json!({"name": format!("photo {i}")}))?;
+            exec(&mut s, "select.rect", json!({"x": 0, "y": 0, "width": w, "height": h}))?;
+            exec(&mut s, "edit.fill", json!({"color": format!("#{:02x}{:02x}80", 60 + i * 50, 200 - i * 60)}))?;
+            exec(&mut s, "select.deselect", json!({}))?;
+        }
+        exec(&mut s, "layer.new.layer", json!({"name": "panel"}))?;
+        exec(&mut s, "select.rect", json!({"x": w / 6, "y": h / 6, "width": w / 3, "height": h / 3}))?;
+        exec(&mut s, "edit.fill", json!({"color": "#c04020"}))?;
+        exec(&mut s, "select.deselect", json!({}))?;
+        exec(&mut s, "layer.layerStyle.dropShadow", json!({"distance": 12, "size": 16}))?;
+        exec(&mut s, "layer.layerStyle.stroke", json!({"size": 3, "color": "#202020", "add": true}))?;
+        let panel = active_layer(&s)?;
+        exec(&mut s, "type.create", json!({"x": w / 10, "y": h * 9 / 10, "text": "Headline", "size": (h / 30).max(12)}))?;
+        exec(&mut s, "layer.newAdjustmentLayer.levels", json!({"inBlack": 8, "inWhite": 245, "gamma": 1.05}))?;
+        let top = active_layer(&s)?;
+        Ok((s, panel, top))
+    };
+    let (mut s, panel, top) = match setup() {
+        Ok(v) => v,
+        Err(e) => {
+            b.errors.push(("photo stack document".into(), e));
+            return;
+        }
+    };
+    let _ = b.refresh(&s, true);
+    let reps = b.reps;
+    for (name, id) in [("photo stack: set panel opacity + refresh", panel), ("photo stack: set Levels opacity + refresh", top)] {
+        b.time(name, &mut s, reps, true, |b, s, i| {
+            let t = Instant::now();
+            exec(s, "layer.setProps", json!({"layer": id, "opacity": if i % 2 == 0 { 0.6 } else { 0.9 }}))?;
+            Ok(ms(t) + b.refresh(s, false)?)
+        });
+    }
+}
+
 /// #209 rows on the layered 20 MP document.
 fn layered_scenarios(b: &mut Bench, sz: &Sizes) {
     let (w, h) = sz.layered;
@@ -436,6 +483,17 @@ fn layered_scenarios(b: &mut Bench, sz: &Sizes) {
         exec(s, "layer.setProps", json!({"layer": target, "opacity": if i % 2 == 0 { 0.6 } else { 0.9 }}))?;
         Ok(ms(t) + b.refresh(s, false)?)
     });
+    // Edits near the top of the stack (the Levels layer is the top one, a headline under it).
+    let tops: Vec<u64> = s.active().map(|st| st.doc.layers.iter().rev().take(2).map(|l| l.id.0).collect()).unwrap_or_default();
+    if let [top, second] = tops[..] {
+        for (name, id) in [("set top layer opacity + refresh", top), ("set second-top layer opacity + refresh", second)] {
+            b.time(name, &mut s, reps, true, |b, s, i| {
+                let t = Instant::now();
+                exec(s, "layer.setProps", json!({"layer": id, "opacity": if i % 2 == 0 { 0.6 } else { 0.9 }}))?;
+                Ok(ms(t) + b.refresh(s, false)?)
+            });
+        }
+    }
     b.time("set layer fill + refresh", &mut s, reps, true, |b, s, i| {
         let t = Instant::now();
         exec(s, "layer.setProps", json!({"layer": target, "fill": if i % 2 == 0 { 0.5 } else { 1.0 }}))?;
