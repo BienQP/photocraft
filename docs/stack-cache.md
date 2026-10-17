@@ -48,5 +48,12 @@ the change detection or the opacity test makes them fail.
 | Photo stack: set panel opacity | 309 ms | 243 ms |
 | Photo stack: set top Levels opacity | 1225 ms | 895 ms |
 
-What remains is per-pixel work: a Levels layer costs ~25 ns per pixel to apply and ~13 ns to
-blend back, and a layer's cached shadow and stroke cost ~55 ns per pixel to composite.
+What remains is per-pixel work. Profiled with callgrind (single thread, 3.84 MP, one opacity
+edit): about 1,100 instructions per pixel before and ~900 after the bit-identical fixes below. The
+Levels path was dominated by seven libm `floorf` calls per pixel (`lut` interpolation and
+`quantize`; x86-64 has no inline floor before SSE4.1, so Apple silicon never paid this) and by the
+generic blend dispatch for Normal adjustment layers; `lut` and `quantize` now truncate and the
+adjustment blend skips the dispatch for Normal, with property tests against the old arithmetic.
+The layer-effects composite (`composite_with_effects_prepared`, ~22 % of an edit) is spread over a
+dozen full-tile passes and buffers with no single hot loop; a real gain there needs a different
+structure, not a faster loop.

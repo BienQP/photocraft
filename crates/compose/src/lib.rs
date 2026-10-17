@@ -682,8 +682,27 @@ pub fn adjustment_quantum(depth: photocraft_color::SampleType) -> Option<f32> {
 fn quantize(b: &mut Buffer, q: f32) {
     for p in &mut b.px {
         for v in p.iter_mut() {
-            *v = (*v * q + 0.5).floor() / q;
+            *v = floor_fast(*v * q + 0.5) / q;
         }
+    }
+}
+
+/// `y.floor()` without the libm call (x86-64 has no inline floor before SSE4.1): a truncating
+/// conversion, corrected downwards for negative fractions. Every input gives the same bits as
+/// `floor`, including -0.0, NaN and values too large for the conversion.
+#[inline]
+fn floor_fast(y: f32) -> f32 {
+    if y.abs() < 8_388_608.0 {
+        let t = y as i32 as f32;
+        if t == y {
+            y
+        } else if t > y {
+            t - 1.0
+        } else {
+            t
+        }
+    } else {
+        y.floor()
     }
 }
 
@@ -1374,7 +1393,9 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
                 // Only `adjusted` has changed; this pixel's original backdrop is still in place.
                 let b = backdrop.px[i];
                 let a = adjusted.px[i];
-                let blended = blend::blend_rgb(layer.blend, [b[0], b[1], b[2]], [a[0], a[1], a[2]]);
+                // Normal blending is the source colour itself (`blend::channel`).
+                let blended =
+                    if layer.blend == BlendMode::Normal { [a[0], a[1], a[2]] } else { blend::blend_rgb(layer.blend, [b[0], b[1], b[2]], [a[0], a[1], a[2]]) };
                 backdrop.px[i] = [b[0] + (blended[0] - b[0]) * k, b[1] + (blended[1] - b[1]) * k, b[2] + (blended[2] - b[2]) * k, b[3]];
             }
         }

@@ -739,6 +739,19 @@ fn map_rgb(buf: &mut Buffer, f: impl Fn([f32; 3]) -> [f32; 3]) {
 
 #[inline]
 fn lut(table: &[f32], v: f32) -> f32 {
+    let last = table.len() - 1;
+    let x = v.clamp(0.0, 1.0) * last as f32;
+    // `x` is never negative here, so truncating is flooring (and NaN gives 0 either way); the
+    // cast is one instruction where `floor` is a libm call on x86-64 without SSE4.1.
+    let i = x as usize;
+    let j = (i + 1).min(last);
+    let f = x - i as f32;
+    table[i] * (1.0 - f) + table[j] * f
+}
+
+/// The previous [`lut`], kept to prove the cast version identical.
+#[cfg(test)]
+fn lut_reference(table: &[f32], v: f32) -> f32 {
     let x = v.clamp(0.0, 1.0) * (table.len() - 1) as f32;
     let i = x.floor() as usize;
     let j = (i + 1).min(table.len() - 1);
@@ -1695,6 +1708,67 @@ mod lut3d_guard_tests {
             assert_eq!(lut3d_sample(&[0.0; 3], 1, c, tetra), c);
             assert_eq!(lut3d_sample(&[0.0; 3], 2, c, tetra), c);
             assert_eq!(lut3d_sample(&[0.0; 24], usize::MAX, c, tetra), c);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lut_tests {
+    use super::*;
+
+    /// xorshift64*: deterministic samples without a dependency.
+    fn rng(state: &mut u64) -> u64 {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn unit(state: &mut u64) -> f32 {
+        (rng(state) >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    fn same(a: f32, b: f32) -> bool {
+        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    }
+
+    #[test]
+    fn lut_matches_the_floor_version_bit_for_bit() {
+        let mut st = 0x9e37_79b9_7f4a_7c15u64;
+        for size in [2usize, 3, 256, 4096] {
+            let table: Vec<f32> = (0..size).map(|_| unit(&mut st) * 1.5 - 0.25).collect();
+            let edge = [
+                0.0,
+                -0.0,
+                1.0,
+                0.5,
+                -1.0,
+                2.0,
+                1e-30,
+                -1e-30,
+                f32::MIN_POSITIVE / 2.0,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::MAX,
+                f32::MIN,
+                1.0 - f32::EPSILON,
+                0.999_999_9,
+            ];
+            for v in edge {
+                assert!(same(lut(&table, v), lut_reference(&table, v)), "size {size}, v {v:?}");
+            }
+            for _ in 0..200_000 {
+                let v = unit(&mut st) * 1.4 - 0.2;
+                assert!(same(lut(&table, v), lut_reference(&table, v)), "size {size}, v {v:?}");
+            }
+            // Every table position and its neighbours: the samples where the index changes.
+            for k in 0..size {
+                let x = k as f32 / (size - 1) as f32;
+                for v in [x, f32::from_bits(x.to_bits().wrapping_add(1)), f32::from_bits(x.to_bits().wrapping_sub(1))] {
+                    assert!(same(lut(&table, v), lut_reference(&table, v)), "size {size}, v {v:?}");
+                }
+            }
         }
     }
 }

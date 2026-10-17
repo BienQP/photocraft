@@ -2570,3 +2570,49 @@ fn effect_cache_follows_a_group_childs_blend_if() {
     assert!(before.px != cold.px, "Blend If should change the group's shadow");
     assert!(warm.px == cold.px, "stale group effect maps after a child's Blend If changed");
 }
+
+#[test]
+fn floor_fast_is_floor() {
+    let mut vals = vec![
+        0.0f32,
+        -0.0,
+        0.5,
+        -0.5,
+        1.0,
+        -1.0,
+        0.999_999_9,
+        -0.999_999_9,
+        255.5,
+        -255.5,
+        8_388_607.5,
+        -8_388_607.5,
+        8_388_608.0,
+        -8_388_608.0,
+        1e9,
+        -1e9,
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+        1e-40,
+        -1e-40,
+    ];
+    let mut st = 0x1234_5678_9abc_def1u64;
+    for _ in 0..300_000 {
+        st ^= st >> 12;
+        st ^= st << 25;
+        st ^= st >> 27;
+        let r = st.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        // Mostly the range quantize sees (up to a 16-bit scale), some wide ones.
+        let v = ((r >> 40) as f32 / (1u64 << 24) as f32 - 0.25) * if r & 7 == 0 { 3e7 } else { 70_000.0 };
+        vals.push(v);
+        vals.push(f32::from_bits((r >> 32) as u32));
+    }
+    for v in vals {
+        let (a, b) = (floor_fast(v), v.floor());
+        assert!(a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()), "floor_fast({v:?}) = {a:?}, floor = {b:?}");
+    }
+}
